@@ -55,6 +55,15 @@ public static class WinDivertNative
 
     [DllImport("WinDivert.dll", CallingConvention = CallingConvention.Cdecl, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern unsafe bool WinDivertRecv(
+        IntPtr handle,
+        byte* packet,
+        uint packetLen,
+        out uint recvLen,
+        ref WinDivertAddress addr);
+
+    [DllImport("WinDivert.dll", CallingConvention = CallingConvention.Cdecl, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool WinDivertSend(
         IntPtr handle,
         byte[] packet,
@@ -64,8 +73,25 @@ public static class WinDivertNative
 
     [DllImport("WinDivert.dll", CallingConvention = CallingConvention.Cdecl, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern unsafe bool WinDivertSend(
+        IntPtr handle,
+        byte* packet,
+        uint packetLen,
+        out uint sendLen,
+        ref WinDivertAddress addr);
+
+    [DllImport("WinDivert.dll", CallingConvention = CallingConvention.Cdecl, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool WinDivertHelperCalcChecksums(
         byte[] packet,
+        uint packetLen,
+        ref WinDivertAddress addr,
+        ulong flags);
+
+    [DllImport("WinDivert.dll", CallingConvention = CallingConvention.Cdecl, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern unsafe bool WinDivertHelperCalcChecksums(
+        byte* packet,
         uint packetLen,
         ref WinDivertAddress addr,
         ulong flags);

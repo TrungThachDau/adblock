@@ -69,97 +69,111 @@ public static class TlsPacket
         return null;
     }
 
-    public static byte[]? BuildTcpRst(byte[] packet, bool isIPv6)
+    public static bool TryBuildTcpRst(ReadOnlySpan<byte> packet, bool isIPv6, Span<byte> destination, out int bytesWritten)
     {
+        bytesWritten = 0;
         if (isIPv6)
         {
-            if (packet.Length < 40 + 20) return null;
+            if (packet.Length < 40 + 20) return false;
             int ipHdrLen = 40;
             int tcpHdrLen = ((packet[ipHdrLen + 12] >> 4) & 0x0F) * 4;
-            if (packet.Length < ipHdrLen + tcpHdrLen) return null;
+            if (packet.Length < ipHdrLen + tcpHdrLen) return false;
             int payloadLen = packet.Length - (ipHdrLen + tcpHdrLen);
 
-            uint origSeq = BinaryPrimitives.ReadUInt32BigEndian(packet.AsSpan(ipHdrLen + 4, 4));
-            uint origAck = BinaryPrimitives.ReadUInt32BigEndian(packet.AsSpan(ipHdrLen + 8, 4));
+            uint origSeq = BinaryPrimitives.ReadUInt32BigEndian(packet.Slice(ipHdrLen + 4, 4));
+            uint origAck = BinaryPrimitives.ReadUInt32BigEndian(packet.Slice(ipHdrLen + 8, 4));
 
             int totalLen = 40 + 20;
-            byte[] res = new byte[totalLen];
-            Array.Copy(packet, 0, res, 0, 40);
+            if (destination.Length < totalLen) return false;
+
+            packet.Slice(0, 40).CopyTo(destination);
 
             // Swap IPv6 Src and Dst
-            byte[] srcIp = new byte[16];
-            byte[] dstIp = new byte[16];
-            Array.Copy(res, 8, srcIp, 0, 16);
-            Array.Copy(res, 24, dstIp, 0, 16);
-            Array.Copy(dstIp, 0, res, 8, 16);
-            Array.Copy(srcIp, 0, res, 24, 16);
-            BinaryPrimitives.WriteUInt16BigEndian(res.AsSpan(4, 2), 20);
+            Span<byte> srcIp = stackalloc byte[16];
+            destination.Slice(8, 16).CopyTo(srcIp);
+            destination.Slice(24, 16).CopyTo(destination.Slice(8, 16));
+            srcIp.CopyTo(destination.Slice(24, 16));
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(4, 2), 20);
 
             // Swap TCP ports
-            ushort srcPort = BinaryPrimitives.ReadUInt16BigEndian(packet.AsSpan(ipHdrLen, 2));
-            ushort dstPort = BinaryPrimitives.ReadUInt16BigEndian(packet.AsSpan(ipHdrLen + 2, 2));
-            BinaryPrimitives.WriteUInt16BigEndian(res.AsSpan(ipHdrLen, 2), dstPort);
-            BinaryPrimitives.WriteUInt16BigEndian(res.AsSpan(ipHdrLen + 2, 2), srcPort);
+            ushort srcPort = BinaryPrimitives.ReadUInt16BigEndian(packet.Slice(ipHdrLen, 2));
+            ushort dstPort = BinaryPrimitives.ReadUInt16BigEndian(packet.Slice(ipHdrLen + 2, 2));
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(ipHdrLen, 2), dstPort);
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(ipHdrLen + 2, 2), srcPort);
 
             uint newSeq = origAck;
             uint newAck = origSeq + (uint)payloadLen;
-            BinaryPrimitives.WriteUInt32BigEndian(res.AsSpan(ipHdrLen + 4, 4), newSeq);
-            BinaryPrimitives.WriteUInt32BigEndian(res.AsSpan(ipHdrLen + 8, 4), newAck);
+            BinaryPrimitives.WriteUInt32BigEndian(destination.Slice(ipHdrLen + 4, 4), newSeq);
+            BinaryPrimitives.WriteUInt32BigEndian(destination.Slice(ipHdrLen + 8, 4), newAck);
 
-            res[ipHdrLen + 12] = 0x50; // Data offset 5
-            res[ipHdrLen + 13] = 0x14; // RST | ACK
-            res.AsSpan(ipHdrLen + 14, 2).Clear(); // Window 0
+            destination[ipHdrLen + 12] = 0x50; // Data offset 5
+            destination[ipHdrLen + 13] = 0x14; // RST | ACK
+            destination.Slice(ipHdrLen + 14, 2).Clear(); // Window 0
+            destination.Slice(ipHdrLen + 16, 4).Clear(); // Checksum & Urgent pointer 0
 
-            return res;
+            bytesWritten = totalLen;
+            return true;
         }
         else
         {
-            if (packet.Length < 20 + 20) return null;
+            if (packet.Length < 20 + 20) return false;
             int ipHdrLen = (packet[0] & 0x0F) * 4;
-            if (packet.Length < ipHdrLen + 20) return null;
+            if (packet.Length < ipHdrLen + 20) return false;
 
             int tcpHdrLen = ((packet[ipHdrLen + 12] >> 4) & 0x0F) * 4;
-            if (packet.Length < ipHdrLen + tcpHdrLen) return null;
+            if (packet.Length < ipHdrLen + tcpHdrLen) return false;
             int payloadLen = packet.Length - (ipHdrLen + tcpHdrLen);
 
-            uint origSeq = BinaryPrimitives.ReadUInt32BigEndian(packet.AsSpan(ipHdrLen + 4, 4));
-            uint origAck = BinaryPrimitives.ReadUInt32BigEndian(packet.AsSpan(ipHdrLen + 8, 4));
+            uint origSeq = BinaryPrimitives.ReadUInt32BigEndian(packet.Slice(ipHdrLen + 4, 4));
+            uint origAck = BinaryPrimitives.ReadUInt32BigEndian(packet.Slice(ipHdrLen + 8, 4));
 
             int totalLen = ipHdrLen + 20;
-            byte[] res = new byte[totalLen];
-            Array.Copy(packet, 0, res, 0, ipHdrLen);
+            if (destination.Length < totalLen) return false;
+
+            packet.Slice(0, ipHdrLen).CopyTo(destination);
 
             // Swap IPv4 Src and Dst
-            byte[] srcIp = new byte[4];
-            byte[] dstIp = new byte[4];
-            Array.Copy(res, 12, srcIp, 0, 4);
-            Array.Copy(res, 16, dstIp, 0, 4);
-            Array.Copy(dstIp, 0, res, 12, 4);
-            Array.Copy(srcIp, 0, res, 16, 4);
+            Span<byte> srcIp = stackalloc byte[4];
+            destination.Slice(12, 4).CopyTo(srcIp);
+            destination.Slice(16, 4).CopyTo(destination.Slice(12, 4));
+            srcIp.CopyTo(destination.Slice(16, 4));
 
-            BinaryPrimitives.WriteUInt16BigEndian(res.AsSpan(2, 2), (ushort)totalLen);
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(2, 2), (ushort)totalLen);
 
             // Swap TCP ports
-            ushort srcPort = BinaryPrimitives.ReadUInt16BigEndian(packet.AsSpan(ipHdrLen, 2));
-            ushort dstPort = BinaryPrimitives.ReadUInt16BigEndian(packet.AsSpan(ipHdrLen + 2, 2));
-            BinaryPrimitives.WriteUInt16BigEndian(res.AsSpan(ipHdrLen, 2), dstPort);
-            BinaryPrimitives.WriteUInt16BigEndian(res.AsSpan(ipHdrLen + 2, 2), srcPort);
+            ushort srcPort = BinaryPrimitives.ReadUInt16BigEndian(packet.Slice(ipHdrLen, 2));
+            ushort dstPort = BinaryPrimitives.ReadUInt16BigEndian(packet.Slice(ipHdrLen + 2, 2));
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(ipHdrLen, 2), dstPort);
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(ipHdrLen + 2, 2), srcPort);
 
             uint newSeq = origAck;
             uint newAck = origSeq + (uint)payloadLen;
-            BinaryPrimitives.WriteUInt32BigEndian(res.AsSpan(ipHdrLen + 4, 4), newSeq);
-            BinaryPrimitives.WriteUInt32BigEndian(res.AsSpan(ipHdrLen + 8, 4), newAck);
+            BinaryPrimitives.WriteUInt32BigEndian(destination.Slice(ipHdrLen + 4, 4), newSeq);
+            BinaryPrimitives.WriteUInt32BigEndian(destination.Slice(ipHdrLen + 8, 4), newAck);
 
-            res[ipHdrLen + 12] = 0x50; // Data offset 5
-            res[ipHdrLen + 13] = 0x14; // RST | ACK
-            res.AsSpan(ipHdrLen + 14, 2).Clear(); // Window 0
-            res.AsSpan(ipHdrLen + 18, 2).Clear(); // Urgent pointer 0
+            destination[ipHdrLen + 12] = 0x50; // Data offset 5
+            destination[ipHdrLen + 13] = 0x14; // RST | ACK
+            destination.Slice(ipHdrLen + 14, 2).Clear(); // Window 0
+            destination.Slice(ipHdrLen + 18, 2).Clear(); // Urgent pointer 0
 
             // Recalculate checksums
-            Checksum.CalcIpv4Checksum(res.AsSpan(0, ipHdrLen));
-            Checksum.CalcTcpIpv4Checksum(res, ipHdrLen);
+            Checksum.CalcIpv4Checksum(destination.Slice(0, ipHdrLen));
+            Checksum.CalcTcpIpv4Checksum(destination.Slice(0, totalLen), ipHdrLen);
 
+            bytesWritten = totalLen;
+            return true;
+        }
+    }
+
+    public static byte[]? BuildTcpRst(byte[] packet, bool isIPv6)
+    {
+        byte[] temp = new byte[64];
+        if (TryBuildTcpRst(packet, isIPv6, temp, out int bytesWritten))
+        {
+            byte[] res = new byte[bytesWritten];
+            temp.AsSpan(0, bytesWritten).CopyTo(res);
             return res;
         }
+        return null;
     }
 }

@@ -50,98 +50,109 @@ public static class DnsPacket
         return new DnsQuestionInfo(string.Join(".", labels), qtype, qclass, cursor);
     }
 
-    public static byte[]? BuildDnsNxdomain(byte[] packet, bool isIPv6)
+    public static bool TryBuildDnsNxdomain(ReadOnlySpan<byte> packet, bool isIPv6, Span<byte> destination, out int bytesWritten)
     {
+        bytesWritten = 0;
         if (isIPv6)
         {
-            if (packet.Length < 40 + 8 + 12) return null;
+            if (packet.Length < 40 + 8 + 12) return false;
             int ipHdrLen = 40;
             int udpHdrLen = 8;
             int dnsOffset = ipHdrLen + udpHdrLen;
 
-            var question = ParseDnsQuestion(packet.AsSpan(dnsOffset));
-            if (question == null) return null;
+            var question = ParseDnsQuestion(packet.Slice(dnsOffset));
+            if (question == null) return false;
 
             int newDnsPayloadLen = question.QuestionEndOffset;
             int newUdpLen = udpHdrLen + newDnsPayloadLen;
             int newTotalLen = ipHdrLen + newUdpLen;
 
-            byte[] res = new byte[newTotalLen];
-            Array.Copy(packet, 0, res, 0, newTotalLen);
+            if (destination.Length < newTotalLen) return false;
+
+            packet.Slice(0, newTotalLen).CopyTo(destination);
 
             // Swap IPv6 Src and Dst
-            byte[] srcIp = new byte[16];
-            byte[] dstIp = new byte[16];
-            Array.Copy(res, 8, srcIp, 0, 16);
-            Array.Copy(res, 24, dstIp, 0, 16);
-            Array.Copy(dstIp, 0, res, 8, 16);
-            Array.Copy(srcIp, 0, res, 24, 16);
+            Span<byte> srcIp = stackalloc byte[16];
+            destination.Slice(8, 16).CopyTo(srcIp);
+            destination.Slice(24, 16).CopyTo(destination.Slice(8, 16));
+            srcIp.CopyTo(destination.Slice(24, 16));
 
-            // Update IPv6 Payload Length
-            BinaryPrimitives.WriteUInt16BigEndian(res.AsSpan(4, 2), (ushort)newUdpLen);
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(4, 2), (ushort)newUdpLen);
 
             // Swap UDP ports
-            ushort srcPort = BinaryPrimitives.ReadUInt16BigEndian(res.AsSpan(ipHdrLen, 2));
-            ushort dstPort = BinaryPrimitives.ReadUInt16BigEndian(res.AsSpan(ipHdrLen + 2, 2));
-            BinaryPrimitives.WriteUInt16BigEndian(res.AsSpan(ipHdrLen, 2), dstPort);
-            BinaryPrimitives.WriteUInt16BigEndian(res.AsSpan(ipHdrLen + 2, 2), srcPort);
-            BinaryPrimitives.WriteUInt16BigEndian(res.AsSpan(ipHdrLen + 4, 2), (ushort)newUdpLen);
+            ushort srcPort = BinaryPrimitives.ReadUInt16BigEndian(packet.Slice(ipHdrLen, 2));
+            ushort dstPort = BinaryPrimitives.ReadUInt16BigEndian(packet.Slice(ipHdrLen + 2, 2));
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(ipHdrLen, 2), dstPort);
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(ipHdrLen + 2, 2), srcPort);
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(ipHdrLen + 4, 2), (ushort)newUdpLen);
 
-            // DNS Flags = 0x8183
-            res[dnsOffset + 2] = 0x81;
-            res[dnsOffset + 3] = 0x83;
-            BinaryPrimitives.WriteUInt16BigEndian(res.AsSpan(dnsOffset + 4, 2), 1);
-            res.AsSpan(dnsOffset + 6, 6).Clear();
+            // DNS Flags: 0x8183 (QR=1, RD=1, RA=1, RCODE=3 Name Error NXDOMAIN)
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(dnsOffset + 2, 2), 0x8183);
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(dnsOffset + 6, 2), 0); // ANCOUNT = 0
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(dnsOffset + 8, 2), 0); // NSCOUNT = 0
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(dnsOffset + 10, 2), 0); // ARCOUNT = 0
 
-            return res;
+            bytesWritten = newTotalLen;
+            return true;
         }
         else
         {
-            if (packet.Length < 20 + 8 + 12) return null;
-            int ihl = (packet[0] & 0x0F) * 4;
+            if (packet.Length < 20 + 8 + 12) return false;
+            int ipHdrLen = (packet[0] & 0x0F) * 4;
             int udpHdrLen = 8;
-            int dnsOffset = ihl + udpHdrLen;
-            if (packet.Length < dnsOffset + 12) return null;
+            int dnsOffset = ipHdrLen + udpHdrLen;
+            if (packet.Length < dnsOffset + 12) return false;
 
-            var question = ParseDnsQuestion(packet.AsSpan(dnsOffset));
-            if (question == null) return null;
+            var question = ParseDnsQuestion(packet.Slice(dnsOffset));
+            if (question == null) return false;
 
             int newDnsPayloadLen = question.QuestionEndOffset;
             int newUdpLen = udpHdrLen + newDnsPayloadLen;
-            int newTotalLen = ihl + newUdpLen;
+            int newTotalLen = ipHdrLen + newUdpLen;
 
-            byte[] res = new byte[newTotalLen];
-            Array.Copy(packet, 0, res, 0, newTotalLen);
+            if (destination.Length < newTotalLen) return false;
+
+            packet.Slice(0, newTotalLen).CopyTo(destination);
 
             // Swap IPv4 Src and Dst
-            byte[] srcIp = new byte[4];
-            byte[] dstIp = new byte[4];
-            Array.Copy(res, 12, srcIp, 0, 4);
-            Array.Copy(res, 16, dstIp, 0, 4);
-            Array.Copy(dstIp, 0, res, 12, 4);
-            Array.Copy(srcIp, 0, res, 16, 4);
+            Span<byte> srcIp = stackalloc byte[4];
+            destination.Slice(12, 4).CopyTo(srcIp);
+            destination.Slice(16, 4).CopyTo(destination.Slice(12, 4));
+            srcIp.CopyTo(destination.Slice(16, 4));
 
-            // Total Length
-            BinaryPrimitives.WriteUInt16BigEndian(res.AsSpan(2, 2), (ushort)newTotalLen);
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(2, 2), (ushort)newTotalLen);
 
             // Swap UDP ports
-            ushort srcPort = BinaryPrimitives.ReadUInt16BigEndian(res.AsSpan(ihl, 2));
-            ushort dstPort = BinaryPrimitives.ReadUInt16BigEndian(res.AsSpan(ihl + 2, 2));
-            BinaryPrimitives.WriteUInt16BigEndian(res.AsSpan(ihl, 2), dstPort);
-            BinaryPrimitives.WriteUInt16BigEndian(res.AsSpan(ihl + 2, 2), srcPort);
-            BinaryPrimitives.WriteUInt16BigEndian(res.AsSpan(ihl + 4, 2), (ushort)newUdpLen);
+            ushort srcPort = BinaryPrimitives.ReadUInt16BigEndian(packet.Slice(ipHdrLen, 2));
+            ushort dstPort = BinaryPrimitives.ReadUInt16BigEndian(packet.Slice(ipHdrLen + 2, 2));
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(ipHdrLen, 2), dstPort);
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(ipHdrLen + 2, 2), srcPort);
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(ipHdrLen + 4, 2), (ushort)newUdpLen);
 
-            // DNS Flags = 0x8183
-            res[dnsOffset + 2] = 0x81;
-            res[dnsOffset + 3] = 0x83;
-            BinaryPrimitives.WriteUInt16BigEndian(res.AsSpan(dnsOffset + 4, 2), 1);
-            res.AsSpan(dnsOffset + 6, 6).Clear();
+            // DNS Flags: 0x8183
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(dnsOffset + 2, 2), 0x8183);
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(dnsOffset + 6, 2), 0);
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(dnsOffset + 8, 2), 0);
+            BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(dnsOffset + 10, 2), 0);
 
-            // Recalculate checksums
-            Checksum.CalcIpv4Checksum(res.AsSpan(0, ihl));
-            Checksum.CalcUdpIpv4Checksum(res, ihl);
+            // Recalculate IPv4 and UDP Checksums
+            Checksum.CalcIpv4Checksum(destination.Slice(0, ipHdrLen));
+            Checksum.CalcUdpIpv4Checksum(destination.Slice(0, newTotalLen), ipHdrLen);
 
+            bytesWritten = newTotalLen;
+            return true;
+        }
+    }
+
+    public static byte[]? BuildDnsNxdomain(byte[] packet, bool isIPv6)
+    {
+        byte[] temp = new byte[packet.Length + 64];
+        if (TryBuildDnsNxdomain(packet, isIPv6, temp, out int bytesWritten))
+        {
+            byte[] res = new byte[bytesWritten];
+            temp.AsSpan(0, bytesWritten).CopyTo(res);
             return res;
         }
+        return null;
     }
 }
