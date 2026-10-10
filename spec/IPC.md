@@ -401,3 +401,4 @@ S->C: {"id":6,"result":{"items":[{"id":"1","timestamp":1728553910,"protocol":"DN
 C->S: {"id":7,"cmd":"stop"}
 S->C: {"id":7,"result":{"status":"ok","state":"stopped"}}
 ```
+

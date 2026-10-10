@@ -53,3 +53,4 @@ forum.net#@#.whitelist-banner
 0.0.0.0 local
 
 ! End of test list
+

@@ -184,3 +184,4 @@ To achieve sub-microsecond lookup latency under high network traffic:
   3. Check `adservice.google.com` &rarr; MATCH.
 - **Domain Trie**: Alternatively, reverse labels (e.g. `["com", "google", "adservice"]`) in a prefix trie.
 - Both engines MUST produce identical matching results for all cases in `/spec/testdata/cases.json`.
+

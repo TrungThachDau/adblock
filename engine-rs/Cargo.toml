@@ -30,6 +30,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
 ] }
+windows-service = "0.8.1"
+windivert = { version = "0.7.0-beta.4", features = ["vendored"] }
+windivert-sys = { version = "0.11.0-beta.2", features = ["vendored"] }
 
 [dev-dependencies]
 hex = "0.4"

@@ -2,6 +2,8 @@ pub mod checksum;
 pub mod dns;
 pub mod tls;
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PacketProtocol {
     Dns,
@@ -15,6 +17,81 @@ pub struct InspectedPacketInfo {
     pub domain: Option<String>,
     pub client_ip: String,
     pub is_ipv6: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TcpFlowKey {
+    pub src_ip: IpAddr,
+    pub src_port: u16,
+    pub dst_ip: IpAddr,
+    pub dst_port: u16,
+}
+
+pub struct TcpPacketDetails {
+    pub flow_key: TcpFlowKey,
+    pub flags: u8,
+    pub payload_offset: usize,
+    pub payload_len: usize,
+    pub is_ipv6: bool,
+}
+
+/// Parse TCP header and extract flow key, flags, and payload bounds
+pub fn parse_tcp_details(packet: &[u8]) -> Option<TcpPacketDetails> {
+    if packet.is_empty() {
+        return None;
+    }
+
+    let version = packet[0] >> 4;
+    let (is_ipv6, ip_hdr_len, src_ip, dst_ip) = match version {
+        4 => {
+            if packet.len() < 20 || packet[9] != 6 {
+                return None;
+            }
+            let ihl = ((packet[0] & 0x0F) as usize) * 4;
+            let src = IpAddr::V4(Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]));
+            let dst = IpAddr::V4(Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]));
+            (false, ihl, src, dst)
+        }
+        6 => {
+            if packet.len() < 40 || packet[6] != 6 {
+                return None;
+            }
+            let mut src_bytes = [0u8; 16];
+            let mut dst_bytes = [0u8; 16];
+            src_bytes.copy_from_slice(&packet[8..24]);
+            dst_bytes.copy_from_slice(&packet[24..40]);
+            (true, 40, IpAddr::V6(Ipv6Addr::from(src_bytes)), IpAddr::V6(Ipv6Addr::from(dst_bytes)))
+        }
+        _ => return None,
+    };
+
+    if packet.len() < ip_hdr_len + 20 {
+        return None;
+    }
+
+    let src_port = u16::from_be_bytes([packet[ip_hdr_len], packet[ip_hdr_len + 1]]);
+    let dst_port = u16::from_be_bytes([packet[ip_hdr_len + 2], packet[ip_hdr_len + 3]]);
+    let data_offset = (((packet[ip_hdr_len + 12] >> 4) & 0x0F) as usize) * 4;
+    if data_offset < 20 || packet.len() < ip_hdr_len + data_offset {
+        return None;
+    }
+
+    let flags = packet[ip_hdr_len + 13];
+    let payload_offset = ip_hdr_len + data_offset;
+    let payload_len = packet.len() - payload_offset;
+
+    Some(TcpPacketDetails {
+        flow_key: TcpFlowKey {
+            src_ip,
+            src_port,
+            dst_ip,
+            dst_port,
+        },
+        flags,
+        payload_offset,
+        payload_len,
+        is_ipv6,
+    })
 }
 
 /// Quick classification of an intercepted packet
