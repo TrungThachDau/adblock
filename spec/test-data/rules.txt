@@ -1,0 +1,17 @@
+# Ad and Tracker Blocklist Test Data
+# Comments start with #
+# Supports exact domains, root domains (matching subdomains), and wildcards (*.domain)
+
+doubleclick.net
+google-analytics.com
+adservice.google.com
+telemetry.microsoft.com
+*.adnxs.com
+graph.facebook.com
+analytics.yahoo.com
+c.bing.com
+trackers.adtech.io
+pixel.advertising.com
+ads.twitter.com
+*.tracker-network.net
+metrics.icloud.com

@@ -1,0 +1,19 @@
+# Build outputs
+target/
+bin/
+obj/
+*.binlog
+*.log
+
+# Visual Studio / Rider / IDEs
+.vs/
+*.user
+*.suo
+.idea/
+.vscode/
+
+# OS generated
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/

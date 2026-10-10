@@ -1,0 +1,37 @@
+{
+  "dns_query_ad": {
+    "description": "IPv4 UDP DNS query for adservice.google.com (should be blocked -> NXDOMAIN)",
+    "protocol": "DNS",
+    "expected_domain": "adservice.google.com",
+    "expected_action": "blocked",
+    "hex": "45000046123400004011ea52c0a8010a08080808c001003500320000aabb010000010000000000000961647365727669636506676f6f676c6503636f6d0000010001"
+  },
+  "dns_query_normal": {
+    "description": "IPv4 UDP DNS query for example.com (should be allowed -> reinject untouched)",
+    "protocol": "DNS",
+    "expected_domain": "example.com",
+    "expected_action": "allowed",
+    "hex": "4500003b567800004011a617c0a8010a01010101d002003500270000ccdd01000001000000000000076578616d706c6503636f6d0000010001"
+  },
+  "tls_clienthello_ad": {
+    "description": "IPv4 TCP ClientHello with SNI adservice.google.com (should be blocked -> TCP RST)",
+    "protocol": "TLS",
+    "expected_domain": "adservice.google.com",
+    "expected_action": "blocked",
+    "hex": "45000085000100004006c496c0a8010a8efb2201d12301bb00000064000003e8501802000000000016030100600100005c03030102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f200000021301010000310000001900170000146164736572766963652e676f6f676c652e636f6d0017000000230000"
+  },
+  "tls_clienthello_normal": {
+    "description": "IPv4 TCP ClientHello with SNI example.com (should be allowed -> reinject untouched)",
+    "protocol": "TLS",
+    "expected_domain": "example.com",
+    "expected_action": "allowed",
+    "hex": "4500007b000200004006c49ec0a8010a8efb2201d12401bb00000064000003e8501802000000000016030100560100005203030102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2000000213010100002700000010000e00000b6578616d706c652e636f6d0017000000230000"
+  },
+  "quic_packet": {
+    "description": "IPv4 UDP packet to port 443 (QUIC / HTTP3) (should be dropped)",
+    "protocol": "QUIC",
+    "expected_domain": "[quic-port-443]",
+    "expected_action": "dropped",
+    "hex": "45000040998800004011667ec0a8010a97654321c10001bb002c0000c000000100000000010203040506070800004000000000000000000000000000"
+  }
+}

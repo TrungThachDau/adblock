@@ -1,0 +1,33 @@
+[package]
+name = "adblock-engine-rs"
+version = "1.0.0"
+edition = "2021"
+authors = ["Adblock Monorepo Team"]
+description = "Windows domain-level ad and tracker blocker engine (Rust)"
+
+[lib]
+name = "adblock_engine_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "adblock-engine-rs"
+path = "src/main.rs"
+
+
+[dependencies]
+tokio = { version = "1.38", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Pipes",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+] }
+
+[dev-dependencies]
+hex = "0.4"

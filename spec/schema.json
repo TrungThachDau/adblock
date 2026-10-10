@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AdblockEngineIpcProtocol",
+  "description": "JSON schema for Adblock Engine Named Pipe IPC protocol",
+  "oneOf": [
+    { "$ref": "#/$defs/RpcRequest" },
+    { "$ref": "#/$defs/RpcSuccessResponse" },
+    { "$ref": "#/$defs/RpcErrorResponse" },
+    { "$ref": "#/$defs/QueryLogEvent" },
+    { "$ref": "#/$defs/StatsUpdateEvent" }
+  ],
+  "$defs": {
+    "RequestId": {
+      "type": ["string", "integer"]
+    },
+    "EngineStats": {
+      "type": "object",
+      "required": ["dns_queries", "dns_blocked", "tls_queries", "tls_blocked", "quic_dropped"],
+      "properties": {
+        "dns_queries": { "type": "integer", "minimum": 0 },
+        "dns_blocked": { "type": "integer", "minimum": 0 },
+        "tls_queries": { "type": "integer", "minimum": 0 },
+        "tls_blocked": { "type": "integer", "minimum": 0 },
+        "quic_dropped": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "RpcRequest": {
+      "type": "object",
+      "required": ["id", "method"],
+      "properties": {
+        "id": { "$ref": "#/$defs/RequestId" },
+        "method": {
+          "type": "string",
+          "enum": [
+            "engine.ping",
+            "engine.get_status",
+            "engine.set_state",
+            "rules.list",
+            "rules.add",
+            "rules.remove",
+            "rules.clear",
+            "stats.get",
+            "stats.reset"
+          ]
+        },
+        "params": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "RpcSuccessResponse": {
+      "type": "object",
+      "required": ["id", "result"],
+      "properties": {
+        "id": { "$ref": "#/$defs/RequestId" },
+        "result": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "RpcErrorResponse": {
+      "type": "object",
+      "required": ["id", "error"],
+      "properties": {
+        "id": { "$ref": "#/$defs/RequestId" },
+        "error": {
+          "type": "object",
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "type": "integer" },
+            "message": { "type": "string" },
+            "data": {}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "QueryLogEvent": {
+      "type": "object",
+      "required": ["event", "data"],
+      "properties": {
+        "event": { "const": "query_log" },
+        "data": {
+          "type": "object",
+          "required": ["id", "timestamp", "protocol", "client_ip", "domain", "action", "reason"],
+          "properties": {
+            "id": { "type": "string" },
+            "timestamp": { "type": "integer" },
+            "protocol": {
+              "type": "string",
+              "enum": ["DNS", "TLS", "QUIC"]
+            },
+            "client_ip": { "type": "string" },
+            "domain": { "type": "string" },
+            "action": {
+              "type": "string",
+              "enum": ["blocked", "allowed", "dropped"]
+            },
+            "reason": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "StatsUpdateEvent": {
+      "type": "object",
+      "required": ["event", "data"],
+      "properties": {
+        "event": { "const": "stats_update" },
+        "data": { "$ref": "#/$defs/EngineStats" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

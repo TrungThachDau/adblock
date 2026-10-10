@@ -1,0 +1,91 @@
+{
+  "rules": [
+    "doubleclick.net",
+    "adservice.google.com",
+    "*.adnxs.com",
+    "trackers.adtech.io",
+    "*.tracker-network.net"
+  ],
+  "cases": [
+    {
+      "query": "doubleclick.net",
+      "expected_blocked": true,
+      "description": "Exact match for apex domain rule"
+    },
+    {
+      "query": "ad.doubleclick.net",
+      "expected_blocked": true,
+      "description": "Subdomain match for apex domain rule"
+    },
+    {
+      "query": "deep.sub.ad.doubleclick.net",
+      "expected_blocked": true,
+      "description": "Multi-level subdomain match for apex domain rule"
+    },
+    {
+      "query": "notdoubleclick.net",
+      "expected_blocked": false,
+      "description": "Domain with same suffix string but different domain label should NOT match"
+    },
+    {
+      "query": "adservice.google.com",
+      "expected_blocked": true,
+      "description": "Exact match for subdomain rule"
+    },
+    {
+      "query": "google.com",
+      "expected_blocked": false,
+      "description": "Parent domain of a blocked subdomain should NOT be blocked"
+    },
+    {
+      "query": "mail.google.com",
+      "expected_blocked": false,
+      "description": "Sibling subdomain should NOT be blocked"
+    },
+    {
+      "query": "ib.adnxs.com",
+      "expected_blocked": true,
+      "description": "Direct match for wildcard rule *.adnxs.com"
+    },
+    {
+      "query": "eu.secure.ib.adnxs.com",
+      "expected_blocked": true,
+      "description": "Nested subdomain match for wildcard rule *.adnxs.com"
+    },
+    {
+      "query": "adnxs.com",
+      "expected_blocked": true,
+      "description": "Base apex domain should match *.adnxs.com wildcard rule"
+    },
+    {
+      "query": "fakeadnxs.com",
+      "expected_blocked": false,
+      "description": "Substring false positive should NOT match"
+    },
+    {
+      "query": "trackers.adtech.io",
+      "expected_blocked": true,
+      "description": "Exact match for trackers.adtech.io"
+    },
+    {
+      "query": "api.tracker-network.net",
+      "expected_blocked": true,
+      "description": "Wildcard match for tracker-network.net"
+    },
+    {
+      "query": "github.com",
+      "expected_blocked": false,
+      "description": "Unrelated popular domain should NOT be blocked"
+    },
+    {
+      "query": "cloudflare.com",
+      "expected_blocked": false,
+      "description": "Unrelated popular domain should NOT be blocked"
+    },
+    {
+      "query": "ADSERVICE.GOOGLE.COM",
+      "expected_blocked": true,
+      "description": "Case insensitivity check"
+    }
+  ]
+}
