@@ -1,6 +1,5 @@
 using System;
 using System.Collections.ObjectModel;
-using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using AdblockApp.Services;
@@ -19,14 +18,30 @@ public class QueryLogItemViewModel
     public string Domain { get; set; } = "";
     public string Action { get; set; } = "";
     public string Reason { get; set; } = "";
-    public bool IsBlocked => Action.Equals("blocked", StringComparison.OrdinalIgnoreCase) ||
-                             Action.Equals("dropped", StringComparison.OrdinalIgnoreCase);
+    public bool IsBlocked => Action.Equals("BLOCKED", StringComparison.OrdinalIgnoreCase) ||
+                             Action.Equals("DROPPED", StringComparison.OrdinalIgnoreCase);
+}
+
+public class BlockedQueryItemViewModel
+{
+    public string Id { get; set; } = "";
+    public string TimeFormatted { get; set; } = "";
+    public string Protocol { get; set; } = "";
+    public string ClientIp { get; set; } = "";
+    public string Domain { get; set; } = "";
+    public string MatchedRule { get; set; } = "";
+    public string SourceList { get; set; } = "";
 }
 
 public partial class MainViewModel : ObservableObject
 {
     private readonly EngineClient _client;
+    private readonly ListManagerService _listManager;
+    private readonly AllowlistService _allowlist;
     private readonly DispatcherQueue _dispatcher;
+
+    public ListManagerService ListManager => _listManager;
+    public AllowlistService Allowlist => _allowlist;
 
     [ObservableProperty]
     private bool _isConnected;
@@ -35,10 +50,36 @@ public partial class MainViewModel : ObservableObject
     private string _statusText = "Connecting to engine...";
 
     [ObservableProperty]
+    private string _engineName = "Detecting...";
+
+    [ObservableProperty]
+    private string _engineVersion = "";
+
+    [ObservableProperty]
     private bool _isRunning;
 
     [ObservableProperty]
     private int _activeRulesCount;
+
+    [ObservableProperty]
+    private int _allowlistCount;
+
+    [ObservableProperty]
+    private int _listsCount;
+
+    [ObservableProperty]
+    private long _uptimeSeconds;
+
+    [ObservableProperty]
+    private string _uptimeFormatted = "0s";
+
+    [ObservableProperty]
+    private long _allowedCount;
+
+    [ObservableProperty]
+    private long _blockedCount;
+
+    public long TotalBlocked => BlockedCount;
 
     [ObservableProperty]
     private long _dnsQueries;
@@ -56,31 +97,67 @@ public partial class MainViewModel : ObservableObject
     private long _quicDropped;
 
     [ObservableProperty]
-    private long _totalBlocked;
+    private double _ramMb;
 
     [ObservableProperty]
     private double _blockRatePercent;
 
     [ObservableProperty]
-    private string _newRuleText = "";
+    private string _newSubscriptionUrl = "";
 
     [ObservableProperty]
-    private string _searchFilter = "";
+    private string _newSubscriptionName = "";
 
     [ObservableProperty]
-    private string _selectedRule = "";
+    private string _newAllowlistRule = "";
 
+    public ObservableCollection<BlocklistSubscription> Subscriptions { get; } = new();
+    public ObservableCollection<string> AllowlistRules { get; } = new();
+    public ObservableCollection<BlockedQueryItemViewModel> RecentBlocked { get; } = new();
     public ObservableCollection<QueryLogItemViewModel> QueryLogs { get; } = new();
-    public ObservableCollection<string> RulesList { get; } = new();
 
-    public MainViewModel(EngineClient client, DispatcherQueue dispatcher)
+    public MainViewModel(EngineClient client, ListManagerService listManager, AllowlistService allowlist, DispatcherQueue dispatcher)
     {
         _client = client;
+        _listManager = listManager;
+        _allowlist = allowlist;
         _dispatcher = dispatcher;
 
         _client.ConnectionStateChanged += OnConnectionChanged;
+        _client.BlockedQueryReceived += OnBlockedQueryReceived;
         _client.QueryLogReceived += OnQueryLogReceived;
         _client.StatsUpdateReceived += OnStatsUpdateReceived;
+
+        _listManager.SubscriptionsChanged += RefreshSubscriptionsCollection;
+        _allowlist.RulesChanged += RefreshAllowlistCollection;
+
+        RefreshSubscriptionsCollection();
+        RefreshAllowlistCollection();
+    }
+
+    private void RefreshSubscriptionsCollection()
+    {
+        _dispatcher.TryEnqueue(() =>
+        {
+            Subscriptions.Clear();
+            foreach (var s in _listManager.Subscriptions)
+            {
+                Subscriptions.Add(s);
+            }
+        });
+    }
+
+    private void RefreshAllowlistCollection()
+    {
+        _dispatcher.TryEnqueue(() =>
+        {
+            AllowlistRules.Clear();
+            foreach (var r in _allowlist.Rules)
+            {
+                AllowlistRules.Add(r);
+            }
+            AllowlistCount = AllowlistRules.Count;
+        });
     }
 
     private void OnConnectionChanged(bool connected)
@@ -88,11 +165,43 @@ public partial class MainViewModel : ObservableObject
         _dispatcher.TryEnqueue(async () =>
         {
             IsConnected = connected;
-            StatusText = connected ? "Engine Connected" : "Connecting to engine...";
             if (connected)
             {
+                StatusText = $"Connected to engine (pipe: \\\\.\\pipe\\{_client.ActivePipeName})";
                 await RefreshStatusAsync();
-                await RefreshRulesAsync();
+                await _listManager.SyncWithEngineAsync();
+                await _allowlist.SyncWithEngineAsync();
+                await FetchRecentBlockedAsync();
+                await RefreshStatusAsync();
+            }
+            else
+            {
+                StatusText = "Engine disconnected. Reconnecting via Named Pipe...";
+                EngineName = "Disconnected";
+                EngineVersion = "";
+            }
+        });
+    }
+
+    private void OnBlockedQueryReceived(BlockedQueryModel b)
+    {
+        _dispatcher.TryEnqueue(() =>
+        {
+            var item = new BlockedQueryItemViewModel
+            {
+                Id = b.Id,
+                TimeFormatted = DateTimeOffset.FromUnixTimeSeconds(b.Timestamp).ToLocalTime().ToString("HH:mm:ss"),
+                Protocol = b.Protocol,
+                ClientIp = b.ClientIp,
+                Domain = b.Domain,
+                MatchedRule = b.MatchedRule,
+                SourceList = b.SourceList
+            };
+
+            RecentBlocked.Insert(0, item);
+            if (RecentBlocked.Count > 100)
+            {
+                RecentBlocked.RemoveAt(RecentBlocked.Count - 1);
             }
         });
     }
@@ -130,39 +239,74 @@ public partial class MainViewModel : ObservableObject
 
     private void UpdateStatsProperties(EngineStatsModel stats)
     {
+        AllowedCount = stats.AllowedCount;
+        BlockedCount = stats.BlockedCount;
         DnsQueries = stats.DnsQueries;
         DnsBlocked = stats.DnsBlocked;
         TlsQueries = stats.TlsQueries;
         TlsBlocked = stats.TlsBlocked;
         QuicDropped = stats.QuicDropped;
+        RamMb = stats.RamMb;
+        UptimeSeconds = stats.UptimeSeconds;
 
-        TotalBlocked = stats.DnsBlocked + stats.TlsBlocked + stats.QuicDropped;
-        long totalTraffic = stats.DnsQueries + stats.TlsQueries + stats.QuicDropped;
-        BlockRatePercent = totalTraffic > 0 ? Math.Round((double)TotalBlocked / totalTraffic * 100.0, 1) : 0.0;
+        var ts = TimeSpan.FromSeconds(stats.UptimeSeconds);
+        UptimeFormatted = ts.TotalHours >= 1 ? $"{(int)ts.TotalHours}h {ts.Minutes}m {ts.Seconds}s" : $"{ts.Minutes}m {ts.Seconds}s";
+
+        long total = stats.AllowedCount + stats.BlockedCount;
+        BlockRatePercent = total > 0 ? Math.Round((double)stats.BlockedCount / total * 100.0, 1) : 0.0;
     }
 
     public async Task RefreshStatusAsync()
     {
+        if (!_client.IsConnected) return;
+
         try
         {
             var status = await _client.GetStatusAsync();
-            IsRunning = status.State == "running";
+            EngineName = status.Name;
+            EngineVersion = status.Version;
+            IsRunning = status.State.Equals("running", StringComparison.OrdinalIgnoreCase);
             ActiveRulesCount = status.ActiveRulesCount;
-            UpdateStatsProperties(status.Stats);
+            AllowlistCount = status.AllowlistCount;
+            ListsCount = status.ListsCount;
+            UptimeSeconds = status.UptimeSeconds;
+
+            var ts = TimeSpan.FromSeconds(status.UptimeSeconds);
+            UptimeFormatted = ts.TotalHours >= 1 ? $"{(int)ts.TotalHours}h {ts.Minutes}m {ts.Seconds}s" : $"{ts.Minutes}m {ts.Seconds}s";
+            StatusText = $"Connected: {status.Name} v{status.Version} ({status.State})";
+
+            if (status.Stats != null)
+            {
+                UpdateStatsProperties(status.Stats);
+            }
+            else
+            {
+                var stats = await _client.GetStatsAsync();
+                UpdateStatsProperties(stats);
+            }
         }
         catch { }
     }
 
-    public async Task RefreshRulesAsync()
+    public async Task FetchRecentBlockedAsync()
     {
+        if (!_client.IsConnected) return;
         try
         {
-            var result = await _client.ListRulesAsync(0, 500);
-            ActiveRulesCount = result.Total;
-            RulesList.Clear();
-            foreach (var r in result.Rules)
+            var items = await _client.GetRecentBlockedAsync(50);
+            RecentBlocked.Clear();
+            foreach (var b in items)
             {
-                RulesList.Add(r);
+                RecentBlocked.Add(new BlockedQueryItemViewModel
+                {
+                    Id = b.Id,
+                    TimeFormatted = DateTimeOffset.FromUnixTimeSeconds(b.Timestamp).ToLocalTime().ToString("HH:mm:ss"),
+                    Protocol = b.Protocol,
+                    ClientIp = b.ClientIp,
+                    Domain = b.Domain,
+                    MatchedRule = b.MatchedRule,
+                    SourceList = b.SourceList
+                });
             }
         }
         catch { }
@@ -171,65 +315,20 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     public async Task ToggleProtectionAsync()
     {
-        if (!IsConnected) return;
+        if (!_client.IsConnected) return;
         try
         {
-            string target = IsRunning ? "paused" : "running";
-            string newState = await _client.SetStateAsync(target);
-            IsRunning = newState == "running";
-        }
-        catch { }
-    }
-
-    [RelayCommand]
-    public async Task AddRuleAsync()
-    {
-        if (string.IsNullOrWhiteSpace(NewRuleText) || !IsConnected) return;
-        try
-        {
-            string rule = NewRuleText.Trim();
-            await _client.AddRulesAsync(new[] { rule });
-            NewRuleText = "";
-            await RefreshRulesAsync();
-        }
-        catch { }
-    }
-
-    [RelayCommand]
-    public async Task RemoveSelectedRuleAsync()
-    {
-        if (string.IsNullOrWhiteSpace(SelectedRule) || !IsConnected) return;
-        try
-        {
-            await _client.RemoveRulesAsync(new[] { SelectedRule });
-            await RefreshRulesAsync();
-        }
-        catch { }
-    }
-
-    [RelayCommand]
-    public async Task ClearAllRulesAsync()
-    {
-        if (!IsConnected) return;
-        try
-        {
-            await _client.ClearRulesAsync();
-            await RefreshRulesAsync();
-        }
-        catch { }
-    }
-
-    [RelayCommand]
-    public async Task ImportRulesFromFileAsync(string filePath)
-    {
-        if (!File.Exists(filePath) || !IsConnected) return;
-        try
-        {
-            var lines = File.ReadAllLines(filePath)
-                .Select(l => l.Trim())
-                .Where(l => !string.IsNullOrEmpty(l) && !l.StartsWith("#"));
-            await _client.AddRulesAsync(lines);
-            await RefreshRulesAsync();
+            if (IsRunning)
+            {
+                string state = await _client.StopEngineAsync();
+                IsRunning = state.Equals("running", StringComparison.OrdinalIgnoreCase);
+            }
+            else
+            {
+                string state = await _client.StartEngineAsync();
+                IsRunning = state.Equals("running", StringComparison.OrdinalIgnoreCase);
+            }
+            StatusText = $"Connected: {EngineName} ({ (IsRunning ? "running" : "stopped") })";
         }
         catch { }
     }
@@ -237,7 +336,7 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     public async Task ResetStatsAsync()
     {
-        if (!IsConnected) return;
+        if (!_client.IsConnected) return;
         try
         {
             await _client.ResetStatsAsync();
@@ -245,6 +344,90 @@ public partial class MainViewModel : ObservableObject
             UpdateStatsProperties(stats);
         }
         catch { }
+    }
+
+    [RelayCommand]
+    public async Task AddSubscriptionAsync()
+    {
+        string url = NewSubscriptionUrl.Trim();
+        string name = NewSubscriptionName.Trim();
+        if (string.IsNullOrEmpty(url)) return;
+
+        NewSubscriptionUrl = "";
+        NewSubscriptionName = "";
+
+        await _listManager.AddListAsync(name, url);
+        await RefreshStatusAsync();
+    }
+
+    [RelayCommand]
+    public async Task ToggleSubscriptionAsync(string id)
+    {
+        var sub = Subscriptions.FirstOrDefault(s => s.Id == id);
+        if (sub == null) return;
+
+        await _listManager.ToggleListAsync(id, !sub.IsEnabled);
+        await RefreshStatusAsync();
+    }
+
+    [RelayCommand]
+    public async Task UpdateSubscriptionAsync(string id)
+    {
+        await _listManager.UpdateListAsync(id);
+        await RefreshStatusAsync();
+    }
+
+    [RelayCommand]
+    public async Task UpdateAllSubscriptionsAsync()
+    {
+        await _listManager.UpdateAllListsAsync();
+        await RefreshStatusAsync();
+    }
+
+    [RelayCommand]
+    public async Task DeleteSubscriptionAsync(string id)
+    {
+        await _listManager.DeleteListAsync(id);
+        await RefreshStatusAsync();
+    }
+
+    [RelayCommand]
+    public async Task AddAllowlistRuleAsync()
+    {
+        string rule = NewAllowlistRule.Trim();
+        if (string.IsNullOrEmpty(rule)) return;
+
+        NewAllowlistRule = "";
+        await _allowlist.AddRuleAsync(rule);
+        await RefreshStatusAsync();
+    }
+
+    [RelayCommand]
+    public async Task RemoveAllowlistRuleAsync(string rule)
+    {
+        await _allowlist.RemoveRuleAsync(rule);
+        await RefreshStatusAsync();
+    }
+
+    [RelayCommand]
+    public async Task ClearAllowlistAsync()
+    {
+        await _allowlist.ClearRulesAsync();
+        await RefreshStatusAsync();
+    }
+
+    [RelayCommand]
+    public async Task AllowBlockedDomainAsync(string domain)
+    {
+        if (string.IsNullOrWhiteSpace(domain)) return;
+        await _allowlist.AddRuleAsync(domain);
+        await RefreshStatusAsync();
+    }
+
+    [RelayCommand]
+    public void ClearRecentBlocked()
+    {
+        RecentBlocked.Clear();
     }
 
     [RelayCommand]

@@ -11,11 +11,16 @@ using System.Threading.Tasks;
 namespace AdblockApp.Services;
 
 public record EngineStatsModel(
+    long AllowedCount,
+    long BlockedCount,
     long DnsQueries,
     long DnsBlocked,
     long TlsQueries,
     long TlsBlocked,
-    long QuicDropped
+    long QuicDropped,
+    long UptimeSeconds,
+    long RamBytes,
+    double RamMb
 );
 
 public record QueryLogModel(
@@ -28,11 +33,37 @@ public record QueryLogModel(
     string Reason
 );
 
+public record BlockedQueryModel(
+    string Id,
+    long Timestamp,
+    string Protocol,
+    string ClientIp,
+    string Domain,
+    string MatchedRule,
+    string SourceList
+);
+
 public record EngineStatusModel(
+    string Name,
+    string Version,
     string State,
     long UptimeSeconds,
     int ActiveRulesCount,
-    EngineStatsModel Stats
+    int AllowlistCount,
+    int ListsCount,
+    EngineStatsModel? Stats
+);
+
+public record SetListsResult(
+    string Status,
+    int LoadedLists,
+    int ActiveRulesCount,
+    List<string> FailedPaths
+);
+
+public record SetAllowlistResult(
+    string Status,
+    int AllowlistCount
 );
 
 public record RulesListResult(
@@ -44,7 +75,8 @@ public record RulesListResult(
 
 public class EngineClient : IDisposable
 {
-    public const string PipeName = "adblock-engine";
+    public static readonly string[] CandidatePipes = ["adblock.engine", "adblock-engine"];
+
     private NamedPipeClientStream? _pipe;
     private StreamWriter? _writer;
     private CancellationTokenSource? _cts;
@@ -53,11 +85,14 @@ public class EngineClient : IDisposable
     private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> _pendingRequests = new();
     private long _requestIdSeq = 1;
     private bool _isConnected;
+    private string _activePipeName = "";
 
     public bool IsConnected => _isConnected;
+    public string ActivePipeName => _activePipeName;
 
     public event Action<bool>? ConnectionStateChanged;
     public event Action<QueryLogModel>? QueryLogReceived;
+    public event Action<BlockedQueryModel>? BlockedQueryReceived;
     public event Action<EngineStatsModel>? StatsUpdateReceived;
 
     public void Start()
@@ -70,31 +105,44 @@ public class EngineClient : IDisposable
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            try
-            {
-                var pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
-                await pipe.ConnectAsync(3000, cancellationToken);
+            bool connected = false;
 
-                _pipe = pipe;
-                _writer = new StreamWriter(pipe, new UTF8Encoding(false)) { AutoFlush = true };
-                _isConnected = true;
-                ConnectionStateChanged?.Invoke(true);
+            foreach (var pipeName in CandidatePipes)
+            {
+                if (cancellationToken.IsCancellationRequested) break;
 
-                _readTask = ReadLoopAsync(pipe, cancellationToken);
-                await _readTask;
-            }
-            catch (TimeoutException) { }
-            catch (IOException) { }
-            catch (OperationCanceledException) { break; }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[PipeClient] Error: {ex.Message}");
-            }
-            finally
-            {
-                _isConnected = false;
-                ConnectionStateChanged?.Invoke(false);
-                Cleanup();
+                try
+                {
+                    var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+                    await pipe.ConnectAsync(1500, cancellationToken);
+
+                    _pipe = pipe;
+                    _activePipeName = pipeName;
+                    _writer = new StreamWriter(pipe, new UTF8Encoding(false)) { AutoFlush = true };
+                    _isConnected = true;
+                    connected = true;
+                    ConnectionStateChanged?.Invoke(true);
+
+                    _readTask = ReadLoopAsync(pipe, cancellationToken);
+                    await _readTask;
+                    break;
+                }
+                catch (TimeoutException) { }
+                catch (IOException) { }
+                catch (OperationCanceledException) { break; }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[PipeClient] Connect failed on {pipeName}: {ex.Message}");
+                }
+                finally
+                {
+                    if (_isConnected && !connected)
+                    {
+                        _isConnected = false;
+                        ConnectionStateChanged?.Invoke(false);
+                    }
+                    Cleanup();
+                }
             }
 
             try
@@ -121,20 +169,45 @@ public class EngineClient : IDisposable
                 using var doc = JsonDocument.Parse(line);
                 var root = doc.RootElement;
 
-                // Check if this is an Event push
+                // 1. Asynchronous push events from engine
                 if (root.TryGetProperty("event", out var eventProp))
                 {
                     string eventType = eventProp.GetString() ?? "";
-                    if (eventType == "query_log" && root.TryGetProperty("data", out var logData))
+                    if (eventType == "blocked_query" && root.TryGetProperty("data", out var bData))
+                    {
+                        var blocked = new BlockedQueryModel(
+                            bData.TryGetProperty("id", out var id) ? id.GetString() ?? "" : "",
+                            bData.TryGetProperty("timestamp", out var ts) ? ts.GetInt64() : 0,
+                            bData.TryGetProperty("protocol", out var proto) ? proto.GetString() ?? "" : "",
+                            bData.TryGetProperty("client_ip", out var ip) ? ip.GetString() ?? "" : "",
+                            bData.TryGetProperty("domain", out var dom) ? dom.GetString() ?? "" : "",
+                            bData.TryGetProperty("matched_rule", out var mr) ? mr.GetString() ?? "" : "",
+                            bData.TryGetProperty("source_list", out var sl) ? sl.GetString() ?? "" : ""
+                        );
+                        BlockedQueryReceived?.Invoke(blocked);
+
+                        // Also emit query log for unified logs
+                        var log = new QueryLogModel(
+                            blocked.Id,
+                            blocked.Timestamp,
+                            blocked.Protocol,
+                            blocked.ClientIp,
+                            blocked.Domain,
+                            "BLOCKED",
+                            blocked.MatchedRule
+                        );
+                        QueryLogReceived?.Invoke(log);
+                    }
+                    else if (eventType == "query_log" && root.TryGetProperty("data", out var logData))
                     {
                         var log = new QueryLogModel(
-                            logData.GetProperty("id").GetString() ?? "",
-                            logData.GetProperty("timestamp").GetInt64(),
-                            logData.GetProperty("protocol").GetString() ?? "",
-                            logData.GetProperty("client_ip").GetString() ?? "",
-                            logData.GetProperty("domain").GetString() ?? "",
-                            logData.GetProperty("action").GetString() ?? "",
-                            logData.GetProperty("reason").GetString() ?? ""
+                            logData.TryGetProperty("id", out var id) ? id.GetString() ?? "" : "",
+                            logData.TryGetProperty("timestamp", out var ts) ? ts.GetInt64() : 0,
+                            logData.TryGetProperty("protocol", out var proto) ? proto.GetString() ?? "" : "",
+                            logData.TryGetProperty("client_ip", out var ip) ? ip.GetString() ?? "" : "",
+                            logData.TryGetProperty("domain", out var dom) ? dom.GetString() ?? "" : "",
+                            logData.TryGetProperty("action", out var act) ? act.GetString() ?? "" : "",
+                            logData.TryGetProperty("reason", out var reas) ? reas.GetString() ?? "" : ""
                         );
                         QueryLogReceived?.Invoke(log);
                     }
@@ -146,7 +219,7 @@ public class EngineClient : IDisposable
                     continue;
                 }
 
-                // Check if this is an RPC Response
+                // 2. RPC command response
                 if (root.TryGetProperty("id", out var idProp))
                 {
                     string idStr = idProp.ToString();
@@ -158,7 +231,7 @@ public class EngineClient : IDisposable
                         }
                         else if (root.TryGetProperty("error", out var errorProp))
                         {
-                            string msg = errorProp.GetProperty("message").GetString() ?? "RPC error";
+                            string msg = errorProp.TryGetProperty("message", out var m) ? m.GetString() ?? "RPC error" : "RPC error";
                             tcs.TrySetException(new Exception(msg));
                         }
                     }
@@ -170,16 +243,36 @@ public class EngineClient : IDisposable
 
     private static EngineStatsModel ParseStats(JsonElement el)
     {
+        long dnsQueries = el.TryGetProperty("dns_queries", out var dq) ? dq.GetInt64() : 0;
+        long dnsBlocked = el.TryGetProperty("dns_blocked", out var db) ? db.GetInt64() : 0;
+        long tlsQueries = el.TryGetProperty("tls_queries", out var tq) ? tq.GetInt64() : 0;
+        long tlsBlocked = el.TryGetProperty("tls_blocked", out var tb) ? tb.GetInt64() : 0;
+        long quicDropped = el.TryGetProperty("quic_dropped", out var qd) ? qd.GetInt64() : 0;
+
+        long allowed = el.TryGetProperty("allowed_count", out var ac) ? ac.GetInt64()
+            : Math.Max(0, (dnsQueries + tlsQueries) - (dnsBlocked + tlsBlocked));
+        long blocked = el.TryGetProperty("blocked_count", out var bc) ? bc.GetInt64()
+            : (dnsBlocked + tlsBlocked + quicDropped);
+
+        long uptime = el.TryGetProperty("uptime_seconds", out var ut) ? ut.GetInt64() : 0;
+        long ramBytes = el.TryGetProperty("ram_bytes", out var rb) ? rb.GetInt64() : 0;
+        double ramMb = el.TryGetProperty("ram_mb", out var rm) ? rm.GetDouble() : Math.Round((double)ramBytes / (1024 * 1024), 2);
+
         return new EngineStatsModel(
-            el.GetProperty("dns_queries").GetInt64(),
-            el.GetProperty("dns_blocked").GetInt64(),
-            el.GetProperty("tls_queries").GetInt64(),
-            el.GetProperty("tls_blocked").GetInt64(),
-            el.GetProperty("quic_dropped").GetInt64()
+            allowed,
+            blocked,
+            dnsQueries,
+            dnsBlocked,
+            tlsQueries,
+            tlsBlocked,
+            quicDropped,
+            uptime,
+            ramBytes,
+            ramMb
         );
     }
 
-    private async Task<JsonElement> SendRequestAsync(string method, object? parameters = null, int timeoutMs = 5000)
+    public async Task<JsonElement> SendCommandAsync(string command, object? parameters = null, int timeoutMs = 6000)
     {
         if (!_isConnected || _writer == null)
             throw new InvalidOperationException("Not connected to engine named pipe.");
@@ -188,10 +281,12 @@ public class EngineClient : IDisposable
         var tcs = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pendingRequests[reqId] = tcs;
 
+        // Supply both 'cmd' (spec IPC.md) and 'method' (JSON-RPC) for universal interchangeability
         var payload = new
         {
             id = reqId,
-            method = method,
+            cmd = command,
+            method = command,
             @params = parameters ?? new { }
         };
 
@@ -202,7 +297,7 @@ public class EngineClient : IDisposable
         using (cts.Token.Register(() => {
             if (_pendingRequests.TryRemove(reqId, out var removed))
             {
-                removed.TrySetException(new TimeoutException("Request timed out."));
+                removed.TrySetException(new TimeoutException($"Request '{command}' timed out."));
             }
         }))
         {
@@ -214,7 +309,7 @@ public class EngineClient : IDisposable
     {
         try
         {
-            var res = await SendRequestAsync("engine.ping");
+            var res = await SendCommandAsync("engine.ping");
             return res.TryGetProperty("status", out var s) && s.GetString() == "ok";
         }
         catch
@@ -225,63 +320,103 @@ public class EngineClient : IDisposable
 
     public async Task<EngineStatusModel> GetStatusAsync()
     {
-        var res = await SendRequestAsync("engine.get_status");
-        string state = res.GetProperty("state").GetString() ?? "unknown";
-        long uptime = res.GetProperty("uptime_seconds").GetInt64();
-        int rulesCount = res.GetProperty("active_rules_count").GetInt32();
-        var stats = ParseStats(res.GetProperty("stats"));
+        var res = await SendCommandAsync("get_status");
+        string name = res.TryGetProperty("name", out var n) ? n.GetString() ?? "Unknown" : "Unknown";
+        string version = res.TryGetProperty("version", out var v) ? v.GetString() ?? "1.0.0" : "1.0.0";
+        string state = res.TryGetProperty("state", out var st) ? st.GetString() ?? "unknown" : "unknown";
+        long uptime = res.TryGetProperty("uptime_seconds", out var ut) ? ut.GetInt64() : 0;
+        int activeRules = res.TryGetProperty("active_rules_count", out var ar) ? ar.GetInt32() : 0;
+        int allowlistCount = res.TryGetProperty("allowlist_count", out var ac) ? ac.GetInt32() : 0;
+        int listsCount = res.TryGetProperty("lists_count", out var lc) ? lc.GetInt32() : 0;
 
-        return new EngineStatusModel(state, uptime, rulesCount, stats);
-    }
-
-    public async Task<string> SetStateAsync(string state)
-    {
-        var res = await SendRequestAsync("engine.set_state", new { state });
-        return res.GetProperty("state").GetString() ?? state;
-    }
-
-    public async Task<RulesListResult> ListRulesAsync(int offset = 0, int limit = 100)
-    {
-        var res = await SendRequestAsync("rules.list", new { offset, limit });
-        int total = res.GetProperty("total").GetInt32();
-        int off = res.GetProperty("offset").GetInt32();
-        int lim = res.GetProperty("limit").GetInt32();
-
-        var list = new List<string>();
-        foreach (var r in res.GetProperty("rules").EnumerateArray())
+        EngineStatsModel? stats = null;
+        if (res.TryGetProperty("stats", out var stEl))
         {
-            if (r.GetString() is { } s) list.Add(s);
+            stats = ParseStats(stEl);
         }
 
-        return new RulesListResult(total, off, lim, list);
+        return new EngineStatusModel(name, version, state, uptime, activeRules, allowlistCount, listsCount, stats);
     }
 
-    public async Task<int> AddRulesAsync(IEnumerable<string> rules)
+    public async Task<string> StartEngineAsync()
     {
-        var res = await SendRequestAsync("rules.add", new { rules });
-        return res.GetProperty("added").GetInt32();
+        var res = await SendCommandAsync("start");
+        return res.TryGetProperty("state", out var s) ? s.GetString() ?? "running" : "running";
     }
 
-    public async Task<int> RemoveRulesAsync(IEnumerable<string> rules)
+    public async Task<string> StopEngineAsync()
     {
-        var res = await SendRequestAsync("rules.remove", new { rules });
-        return res.GetProperty("removed").GetInt32();
+        var res = await SendCommandAsync("stop");
+        return res.TryGetProperty("state", out var s) ? s.GetString() ?? "stopped" : "stopped";
     }
 
-    public async Task ClearRulesAsync()
+    public async Task<SetListsResult> SetListsAsync(IEnumerable<string> paths)
     {
-        await SendRequestAsync("rules.clear");
+        var res = await SendCommandAsync("set_lists", new { paths });
+        string status = res.TryGetProperty("status", out var s) ? s.GetString() ?? "ok" : "ok";
+        int loadedLists = res.TryGetProperty("loaded_lists", out var ll) ? ll.GetInt32() : 0;
+        int activeRules = res.TryGetProperty("active_rules_count", out var ar) ? ar.GetInt32() : 0;
+
+        var failed = new List<string>();
+        if (res.TryGetProperty("failed_paths", out var fp) && fp.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var el in fp.EnumerateArray())
+            {
+                if (el.GetString() is { } str) failed.Add(str);
+            }
+        }
+
+        return new SetListsResult(status, loadedLists, activeRules, failed);
+    }
+
+    public async Task<SetAllowlistResult> SetAllowlistAsync(IEnumerable<string> rules, IEnumerable<string>? paths = null)
+    {
+        var res = await SendCommandAsync("set_allowlist", new
+        {
+            rules,
+            paths = paths ?? Array.Empty<string>()
+        });
+        string status = res.TryGetProperty("status", out var s) ? s.GetString() ?? "ok" : "ok";
+        int count = res.TryGetProperty("allowlist_count", out var ac) ? ac.GetInt32() : 0;
+        return new SetAllowlistResult(status, count);
     }
 
     public async Task<EngineStatsModel> GetStatsAsync()
     {
-        var res = await SendRequestAsync("stats.get");
+        var res = await SendCommandAsync("get_stats");
         return ParseStats(res);
+    }
+
+    public async Task<List<BlockedQueryModel>> GetRecentBlockedAsync(int limit = 50)
+    {
+        var res = await SendCommandAsync("get_recent_blocked", new { limit });
+        var list = new List<BlockedQueryModel>();
+        if (res.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var el in items.EnumerateArray())
+            {
+                list.Add(new BlockedQueryModel(
+                    el.TryGetProperty("id", out var id) ? id.GetString() ?? "" : "",
+                    el.TryGetProperty("timestamp", out var ts) ? ts.GetInt64() : 0,
+                    el.TryGetProperty("protocol", out var proto) ? proto.GetString() ?? "" : "",
+                    el.TryGetProperty("client_ip", out var ip) ? ip.GetString() ?? "" : "",
+                    el.TryGetProperty("domain", out var dom) ? dom.GetString() ?? "" : "",
+                    el.TryGetProperty("matched_rule", out var mr) ? mr.GetString() ?? "" : (el.TryGetProperty("reason", out var re) ? re.GetString() ?? "" : ""),
+                    el.TryGetProperty("source_list", out var sl) ? sl.GetString() ?? "" : ""
+                ));
+            }
+        }
+        return list;
+    }
+
+    public async Task ReloadAsync()
+    {
+        await SendCommandAsync("reload");
     }
 
     public async Task ResetStatsAsync()
     {
-        await SendRequestAsync("stats.reset");
+        await SendCommandAsync("stats.reset");
     }
 
     private void Cleanup()
