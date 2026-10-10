@@ -6,3 +6,4 @@ if %ERRORLEVEL% NEQ 0 (
     echo Co loi xay ra khi khoi dong.
     pause
 )
+

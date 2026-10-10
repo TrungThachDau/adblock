@@ -13,4 +13,3 @@ public class App : Application
         _window.Activate();
     }
 }
-

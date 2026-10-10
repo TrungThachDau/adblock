@@ -308,9 +308,10 @@ public class MainWindow : Window
             Background = new SolidColorBrush(Color.FromArgb(255, 24, 24, 27))
         };
         rootGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        rootGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         rootGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
-        // Header Bar
+        // Header Bar (Row 0)
         var headerBorder = new Border
         {
             Background = new SolidColorBrush(Color.FromArgb(255, 32, 32, 36)),
@@ -366,36 +367,96 @@ public class MainWindow : Window
         headerBorder.Child = headerGrid;
         rootGrid.Children.Add(headerBorder);
 
-        // Tab Navigation
-        var tabView = new TabView
+        // Navigation Bar (Row 1)
+        var navBar = new Border
         {
-            IsAddTabButtonVisible = false,
-            Padding = new Thickness(16, 8, 16, 16)
+            Background = new SolidColorBrush(Color.FromArgb(255, 28, 28, 32)),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(255, 42, 42, 48)),
+            BorderThickness = new Thickness(0, 0, 0, 1),
+            Padding = new Thickness(24, 10, 24, 10)
         };
-        Grid.SetRow(tabView, 1);
+        Grid.SetRow(navBar, 1);
 
-        // Tab 1: Dashboard
-        var dashTab = new TabViewItem { Header = "Dashboard", IsClosable = false };
-        dashTab.Content = BuildDashboardContent();
-        tabView.TabItems.Add(dashTab);
+        var navStack = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 10
+        };
 
-        // Tab 2: Blocklists
-        var listsTab = new TabViewItem { Header = "Blocklists", IsClosable = false };
-        listsTab.Content = BuildListsContent();
-        tabView.TabItems.Add(listsTab);
+        // Views Container (Row 2)
+        var contentGrid = new Grid();
+        Grid.SetRow(contentGrid, 2);
 
-        // Tab 3: Allowlist
-        var allowTab = new TabViewItem { Header = "Allowlist", IsClosable = false };
-        allowTab.Content = BuildAllowlistContent();
-        tabView.TabItems.Add(allowTab);
+        var dashView = BuildDashboardContent();
+        var listsView = BuildListsContent();
+        var allowView = BuildAllowlistContent();
+        var logsView = BuildQueryLogContent();
 
-        // Tab 4: Live Query Log
-        var logTab = new TabViewItem { Header = "Live Query Log", IsClosable = false };
-        logTab.Content = BuildQueryLogContent();
-        tabView.TabItems.Add(logTab);
+        dashView.Visibility = Visibility.Visible;
+        listsView.Visibility = Visibility.Collapsed;
+        allowView.Visibility = Visibility.Collapsed;
+        logsView.Visibility = Visibility.Collapsed;
 
-        rootGrid.Children.Add(tabView);
+        contentGrid.Children.Add(dashView);
+        contentGrid.Children.Add(listsView);
+        contentGrid.Children.Add(allowView);
+        contentGrid.Children.Add(logsView);
+
+        // Navigation Tab Buttons
+        var dashBtn = CreateNavTabButton("📊 Dashboard", true);
+        var listsBtn = CreateNavTabButton("🛡️ Blocklists", false);
+        var allowBtn = CreateNavTabButton("✅ Allowlist", false);
+        var logsBtn = CreateNavTabButton("📋 Live Query Log", false);
+
+        void SelectTab(int index)
+        {
+            dashView.Visibility = index == 0 ? Visibility.Visible : Visibility.Collapsed;
+            listsView.Visibility = index == 1 ? Visibility.Visible : Visibility.Collapsed;
+            allowView.Visibility = index == 2 ? Visibility.Visible : Visibility.Collapsed;
+            logsView.Visibility = index == 3 ? Visibility.Visible : Visibility.Collapsed;
+
+            UpdateNavTabStyle(dashBtn, index == 0);
+            UpdateNavTabStyle(listsBtn, index == 1);
+            UpdateNavTabStyle(allowBtn, index == 2);
+            UpdateNavTabStyle(logsBtn, index == 3);
+        }
+
+        dashBtn.Click += (s, e) => SelectTab(0);
+        listsBtn.Click += (s, e) => SelectTab(1);
+        allowBtn.Click += (s, e) => SelectTab(2);
+        logsBtn.Click += (s, e) => SelectTab(3);
+
+        navStack.Children.Add(dashBtn);
+        navStack.Children.Add(listsBtn);
+        navStack.Children.Add(allowBtn);
+        navStack.Children.Add(logsBtn);
+        navBar.Child = navStack;
+
+        rootGrid.Children.Add(navBar);
+        rootGrid.Children.Add(contentGrid);
         return rootGrid;
+    }
+
+    private static Button CreateNavTabButton(string label, bool isActive)
+    {
+        var btn = new Button
+        {
+            Content = label,
+            FontSize = 13,
+            Padding = new Thickness(14, 6, 14, 6),
+            CornerRadius = new CornerRadius(6)
+        };
+        UpdateNavTabStyle(btn, isActive);
+        return btn;
+    }
+
+    private static void UpdateNavTabStyle(Button btn, bool isActive)
+    {
+        btn.FontWeight = isActive ? FontWeights.SemiBold : FontWeights.Normal;
+        btn.Background = new SolidColorBrush(isActive ? Color.FromArgb(255, 33, 150, 243) : Color.FromArgb(0, 0, 0, 0));
+        btn.Foreground = new SolidColorBrush(isActive ? Colors.White : Color.FromArgb(200, 200, 200, 200));
+        btn.BorderBrush = new SolidColorBrush(isActive ? Color.FromArgb(255, 33, 150, 243) : Color.FromArgb(50, 255, 255, 255));
+        btn.BorderThickness = new Thickness(1);
     }
 
     private UIElement BuildDashboardContent()

@@ -75,3 +75,4 @@ if (Test-Path $appExe) {
 } else {
     Write-Host "[Loi] Khong tim thay file thuc thi AdblockApp.exe tai $appExe" -ForegroundColor Red
 }
+
