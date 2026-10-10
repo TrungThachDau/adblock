@@ -1,5 +1,9 @@
 using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
+using System.ComponentModel;
 using System.Linq;
 using System.Threading.Tasks;
 using AdblockApp.Services;
@@ -8,6 +12,44 @@ using CommunityToolkit.Mvvm.Input;
 using Microsoft.UI.Dispatching;
 
 namespace AdblockApp.ViewModels;
+
+public class BulkObservableCollection<T> : ObservableCollection<T>
+{
+    private bool _suppressNotification;
+
+    public void AddRangeToStart(IReadOnlyList<T> items, int maxCount = 300)
+    {
+        if (items.Count == 0) return;
+
+        _suppressNotification = true;
+        try
+        {
+            for (int i = items.Count - 1; i >= 0; i--)
+            {
+                Items.Insert(0, items[i]);
+            }
+            while (Items.Count > maxCount)
+            {
+                Items.RemoveAt(Items.Count - 1);
+            }
+        }
+        finally
+        {
+            _suppressNotification = false;
+            OnPropertyChanged(new PropertyChangedEventArgs(nameof(Count)));
+            OnPropertyChanged(new PropertyChangedEventArgs("Item[]"));
+            OnCollectionChanged(new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
+        }
+    }
+
+    protected override void OnCollectionChanged(NotifyCollectionChangedEventArgs e)
+    {
+        if (!_suppressNotification)
+        {
+            base.OnCollectionChanged(e);
+        }
+    }
+}
 
 public class QueryLogItemViewModel
 {
@@ -20,6 +62,8 @@ public class QueryLogItemViewModel
     public string Reason { get; set; } = "";
     public bool IsBlocked => Action.Equals("BLOCKED", StringComparison.OrdinalIgnoreCase) ||
                              Action.Equals("DROPPED", StringComparison.OrdinalIgnoreCase);
+
+    public override string ToString() => $"[{TimeFormatted}] [{Protocol,-4}] {Action,-8} {Domain} {(string.IsNullOrEmpty(Reason) ? "" : $"({Reason})")}";
 }
 
 public class BlockedQueryItemViewModel
@@ -39,6 +83,11 @@ public partial class MainViewModel : ObservableObject
     private readonly ListManagerService _listManager;
     private readonly AllowlistService _allowlist;
     private readonly DispatcherQueue _dispatcher;
+
+    private readonly ConcurrentQueue<BlockedQueryItemViewModel> _incomingBlocked = new();
+    private readonly ConcurrentQueue<QueryLogItemViewModel> _incomingLogs = new();
+    private volatile EngineStatsModel? _latestStats;
+    private readonly DispatcherQueueTimer _batchTimer;
 
     public ListManagerService ListManager => _listManager;
     public AllowlistService Allowlist => _allowlist;
@@ -114,7 +163,7 @@ public partial class MainViewModel : ObservableObject
     public ObservableCollection<BlocklistSubscription> Subscriptions { get; } = new();
     public ObservableCollection<string> AllowlistRules { get; } = new();
     public ObservableCollection<BlockedQueryItemViewModel> RecentBlocked { get; } = new();
-    public ObservableCollection<QueryLogItemViewModel> QueryLogs { get; } = new();
+    public BulkObservableCollection<QueryLogItemViewModel> QueryLogs { get; } = new();
 
     public MainViewModel(EngineClient client, ListManagerService listManager, AllowlistService allowlist, DispatcherQueue dispatcher)
     {
@@ -122,6 +171,11 @@ public partial class MainViewModel : ObservableObject
         _listManager = listManager;
         _allowlist = allowlist;
         _dispatcher = dispatcher;
+
+        _batchTimer = _dispatcher.CreateTimer();
+        _batchTimer.Interval = TimeSpan.FromMilliseconds(250);
+        _batchTimer.Tick += OnBatchTimerTick;
+        _batchTimer.Start();
 
         _client.ConnectionStateChanged += OnConnectionChanged;
         _client.BlockedQueryReceived += OnBlockedQueryReceived;
@@ -162,17 +216,12 @@ public partial class MainViewModel : ObservableObject
 
     private void OnConnectionChanged(bool connected)
     {
-        _dispatcher.TryEnqueue(async () =>
+        _dispatcher.TryEnqueue(() =>
         {
             IsConnected = connected;
             if (connected)
             {
                 StatusText = $"Connected to engine (pipe: \\\\.\\pipe\\{_client.ActivePipeName})";
-                await RefreshStatusAsync();
-                await _listManager.SyncWithEngineAsync();
-                await _allowlist.SyncWithEngineAsync();
-                await FetchRecentBlockedAsync();
-                await RefreshStatusAsync();
             }
             else
             {
@@ -181,60 +230,110 @@ public partial class MainViewModel : ObservableObject
                 EngineVersion = "";
             }
         });
+
+        if (connected)
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await RefreshStatusAsync();
+                    await _listManager.SyncWithEngineAsync();
+                    await _allowlist.SyncWithEngineAsync();
+                    await FetchRecentBlockedAsync();
+                    await RefreshStatusAsync();
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[MainViewModel] Connection sync failed: {ex.Message}");
+                }
+            });
+        }
     }
 
     private void OnBlockedQueryReceived(BlockedQueryModel b)
     {
-        _dispatcher.TryEnqueue(() =>
+        var item = new BlockedQueryItemViewModel
         {
-            var item = new BlockedQueryItemViewModel
-            {
-                Id = b.Id,
-                TimeFormatted = DateTimeOffset.FromUnixTimeSeconds(b.Timestamp).ToLocalTime().ToString("HH:mm:ss"),
-                Protocol = b.Protocol,
-                ClientIp = b.ClientIp,
-                Domain = b.Domain,
-                MatchedRule = b.MatchedRule,
-                SourceList = b.SourceList
-            };
+            Id = b.Id,
+            TimeFormatted = DateTimeOffset.FromUnixTimeSeconds(b.Timestamp).ToLocalTime().ToString("HH:mm:ss"),
+            Protocol = b.Protocol,
+            ClientIp = b.ClientIp,
+            Domain = b.Domain,
+            MatchedRule = b.MatchedRule,
+            SourceList = b.SourceList
+        };
 
-            RecentBlocked.Insert(0, item);
-            if (RecentBlocked.Count > 100)
-            {
-                RecentBlocked.RemoveAt(RecentBlocked.Count - 1);
-            }
-        });
+        _incomingBlocked.Enqueue(item);
+        while (_incomingBlocked.Count > 100)
+        {
+            _incomingBlocked.TryDequeue(out _);
+        }
     }
 
     private void OnQueryLogReceived(QueryLogModel log)
     {
-        _dispatcher.TryEnqueue(() =>
+        var item = new QueryLogItemViewModel
         {
-            var item = new QueryLogItemViewModel
-            {
-                Id = log.Id,
-                TimeFormatted = DateTimeOffset.FromUnixTimeSeconds(log.Timestamp).ToLocalTime().ToString("HH:mm:ss"),
-                Protocol = log.Protocol,
-                ClientIp = log.ClientIp,
-                Domain = log.Domain,
-                Action = log.Action.ToUpperInvariant(),
-                Reason = log.Reason
-            };
+            Id = log.Id,
+            TimeFormatted = DateTimeOffset.FromUnixTimeSeconds(log.Timestamp).ToLocalTime().ToString("HH:mm:ss"),
+            Protocol = log.Protocol,
+            ClientIp = log.ClientIp,
+            Domain = log.Domain,
+            Action = log.Action.ToUpperInvariant(),
+            Reason = log.Reason
+        };
 
-            QueryLogs.Insert(0, item);
-            if (QueryLogs.Count > 300)
-            {
-                QueryLogs.RemoveAt(QueryLogs.Count - 1);
-            }
-        });
+        _incomingLogs.Enqueue(item);
+        while (_incomingLogs.Count > 300)
+        {
+            _incomingLogs.TryDequeue(out _);
+        }
     }
 
     private void OnStatsUpdateReceived(EngineStatsModel stats)
     {
-        _dispatcher.TryEnqueue(() =>
+        _latestStats = stats;
+    }
+
+    private void OnBatchTimerTick(DispatcherQueueTimer sender, object args)
+    {
+        // 1. Process latest engine stats
+        var stats = _latestStats;
+        if (stats != null)
         {
+            _latestStats = null;
             UpdateStatsProperties(stats);
-        });
+        }
+
+        // 2. Process incoming blocked queries
+        var blockedList = new List<BlockedQueryItemViewModel>();
+        while (_incomingBlocked.TryDequeue(out var b) && blockedList.Count < 50)
+        {
+            blockedList.Add(b);
+        }
+        if (blockedList.Count > 0)
+        {
+            for (int i = blockedList.Count - 1; i >= 0; i--)
+            {
+                RecentBlocked.Insert(0, blockedList[i]);
+            }
+            while (RecentBlocked.Count > 100)
+            {
+                RecentBlocked.RemoveAt(RecentBlocked.Count - 1);
+            }
+        }
+
+        // 3. Process incoming query logs in bulk
+        var logsList = new List<QueryLogItemViewModel>();
+        while (_incomingLogs.TryDequeue(out var log) && logsList.Count < 100)
+        {
+            logsList.Add(log);
+        }
+        if (logsList.Count > 0)
+        {
+            QueryLogs.AddRangeToStart(logsList, 300);
+        }
     }
 
     private void UpdateStatsProperties(EngineStatsModel stats)
@@ -263,27 +362,24 @@ public partial class MainViewModel : ObservableObject
         try
         {
             var status = await _client.GetStatusAsync();
-            EngineName = status.Name;
-            EngineVersion = status.Version;
-            IsRunning = status.State.Equals("running", StringComparison.OrdinalIgnoreCase);
-            ActiveRulesCount = status.ActiveRulesCount;
-            AllowlistCount = status.AllowlistCount;
-            ListsCount = status.ListsCount;
-            UptimeSeconds = status.UptimeSeconds;
+            var stats = status.Stats ?? await _client.GetStatsAsync();
 
-            var ts = TimeSpan.FromSeconds(status.UptimeSeconds);
-            UptimeFormatted = ts.TotalHours >= 1 ? $"{(int)ts.TotalHours}h {ts.Minutes}m {ts.Seconds}s" : $"{ts.Minutes}m {ts.Seconds}s";
-            StatusText = $"Connected: {status.Name} v{status.Version} ({status.State})";
+            _dispatcher.TryEnqueue(() =>
+            {
+                EngineName = status.Name;
+                EngineVersion = status.Version;
+                IsRunning = status.State.Equals("running", StringComparison.OrdinalIgnoreCase);
+                ActiveRulesCount = status.ActiveRulesCount;
+                AllowlistCount = status.AllowlistCount;
+                ListsCount = status.ListsCount;
+                UptimeSeconds = status.UptimeSeconds;
 
-            if (status.Stats != null)
-            {
-                UpdateStatsProperties(status.Stats);
-            }
-            else
-            {
-                var stats = await _client.GetStatsAsync();
+                var ts = TimeSpan.FromSeconds(status.UptimeSeconds);
+                UptimeFormatted = ts.TotalHours >= 1 ? $"{(int)ts.TotalHours}h {ts.Minutes}m {ts.Seconds}s" : $"{ts.Minutes}m {ts.Seconds}s";
+                StatusText = $"Connected: {status.Name} v{status.Version} ({status.State})";
+
                 UpdateStatsProperties(stats);
-            }
+            });
         }
         catch { }
     }
@@ -294,20 +390,23 @@ public partial class MainViewModel : ObservableObject
         try
         {
             var items = await _client.GetRecentBlockedAsync(50);
-            RecentBlocked.Clear();
-            foreach (var b in items)
+            _dispatcher.TryEnqueue(() =>
             {
-                RecentBlocked.Add(new BlockedQueryItemViewModel
+                RecentBlocked.Clear();
+                foreach (var b in items)
                 {
-                    Id = b.Id,
-                    TimeFormatted = DateTimeOffset.FromUnixTimeSeconds(b.Timestamp).ToLocalTime().ToString("HH:mm:ss"),
-                    Protocol = b.Protocol,
-                    ClientIp = b.ClientIp,
-                    Domain = b.Domain,
-                    MatchedRule = b.MatchedRule,
-                    SourceList = b.SourceList
-                });
-            }
+                    RecentBlocked.Add(new BlockedQueryItemViewModel
+                    {
+                        Id = b.Id,
+                        TimeFormatted = DateTimeOffset.FromUnixTimeSeconds(b.Timestamp).ToLocalTime().ToString("HH:mm:ss"),
+                        Protocol = b.Protocol,
+                        ClientIp = b.ClientIp,
+                        Domain = b.Domain,
+                        MatchedRule = b.MatchedRule,
+                        SourceList = b.SourceList
+                    });
+                }
+            });
         }
         catch { }
     }
@@ -341,7 +440,7 @@ public partial class MainViewModel : ObservableObject
         {
             await _client.ResetStatsAsync();
             var stats = await _client.GetStatsAsync();
-            UpdateStatsProperties(stats);
+            _dispatcher.TryEnqueue(() => UpdateStatsProperties(stats));
         }
         catch { }
     }

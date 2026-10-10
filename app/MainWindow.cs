@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Specialized;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -28,6 +29,7 @@ public class MainWindow : Window
     private readonly TextBlock _engineBadge;
     private readonly TextBlock _statusSubtitle;
     private readonly ToggleSwitch _protectionToggle;
+    private bool _isUpdatingToggle = false;
 
     // Dashboard Metric Controls
     private readonly TextBlock _totalBlockedText;
@@ -52,11 +54,23 @@ public class MainWindow : Window
 
     // Recent Blocked Controls
     private readonly StackPanel _recentBlockedPanel;
+    private readonly TextBlock _noRecentBlockedPlaceholder;
 
     // Query Log Controls
     private readonly ListView _queryLogListView;
 
     private bool _isExplicitExit = false;
+
+    private class QueryLogRowHolder
+    {
+        public TextBlock TimeText { get; set; } = null!;
+        public Border ProtoBadge { get; set; } = null!;
+        public TextBlock ProtoText { get; set; } = null!;
+        public Border ActionBadge { get; set; } = null!;
+        public TextBlock ActionText { get; set; } = null!;
+        public TextBlock DomainText { get; set; } = null!;
+        public TextBlock ReasonText { get; set; } = null!;
+    }
 
     public MainWindow()
     {
@@ -138,6 +152,7 @@ public class MainWindow : Window
         };
         _protectionToggle.Toggled += async (s, e) =>
         {
+            if (_isUpdatingToggle) return;
             if (_protectionToggle.IsOn != ViewModel.IsRunning)
             {
                 await ViewModel.ToggleProtectionAsync();
@@ -215,6 +230,13 @@ public class MainWindow : Window
 
         // Recent Blocked
         _recentBlockedPanel = new StackPanel { Spacing = 8 };
+        _noRecentBlockedPlaceholder = new TextBlock
+        {
+            Text = "No blocked queries recorded yet. Blocked DNS and TLS connections will appear here in real-time.",
+            FontSize = 13,
+            Foreground = new SolidColorBrush(Color.FromArgb(160, 160, 160, 160)),
+            Margin = new Thickness(0, 12, 0, 0)
+        };
 
         // Query Log
         _queryLogListView = new ListView
@@ -222,83 +244,400 @@ public class MainWindow : Window
             ItemsSource = ViewModel.QueryLogs,
             SelectionMode = ListViewSelectionMode.None
         };
+        _queryLogListView.ContainerContentChanging += OnQueryLogContainerContentChanging;
 
         this.Content = BuildRootLayout();
 
         // Bind ViewModel Property Changes to UI Controls
         ViewModel.PropertyChanged += (s, e) =>
         {
-            DispatcherQueue.TryEnqueue(() =>
+            if (DispatcherQueue.HasThreadAccess)
             {
-                switch (e.PropertyName)
-                {
-                    case nameof(ViewModel.IsConnected):
-                        _protectionToggle.IsEnabled = ViewModel.IsConnected;
-                        break;
-                    case nameof(ViewModel.StatusText):
-                        _statusSubtitle.Text = ViewModel.StatusText;
-                        break;
-                    case nameof(ViewModel.EngineName):
-                    case nameof(ViewModel.EngineVersion):
-                        string badge = $"{ViewModel.EngineName} {ViewModel.EngineVersion}".Trim().ToUpperInvariant();
-                        _engineBadge.Text = string.IsNullOrEmpty(badge) ? "ENGINE" : badge;
-                        _trayIcon.UpdateTooltip($"Adblock ({ViewModel.EngineName}) - {(ViewModel.IsRunning ? "Active" : "Paused")}");
-                        break;
-                    case nameof(ViewModel.IsRunning):
-                        if (_protectionToggle.IsOn != ViewModel.IsRunning)
-                            _protectionToggle.IsOn = ViewModel.IsRunning;
-                        _trayIcon.UpdateTooltip($"Adblock ({ViewModel.EngineName}) - {(ViewModel.IsRunning ? "Active" : "Paused")}");
-                        break;
-                    case nameof(ViewModel.TotalBlocked):
-                        _totalBlockedText.Text = ViewModel.TotalBlocked.ToString("N0");
-                        break;
-                    case nameof(ViewModel.BlockRatePercent):
-                        _blockRateText.Text = $"{ViewModel.BlockRatePercent:F1}% Block Rate";
-                        break;
-                    case nameof(ViewModel.DnsBlocked):
-                        _dnsBlockedText.Text = ViewModel.DnsBlocked.ToString("N0");
-                        break;
-                    case nameof(ViewModel.DnsQueries):
-                        _dnsTotalText.Text = $"{ViewModel.DnsQueries:N0} total queries";
-                        break;
-                    case nameof(ViewModel.TlsBlocked):
-                        _tlsBlockedText.Text = ViewModel.TlsBlocked.ToString("N0");
-                        break;
-                    case nameof(ViewModel.TlsQueries):
-                        _tlsTotalText.Text = $"{ViewModel.TlsQueries:N0} total handshakes";
-                        break;
-                    case nameof(ViewModel.QuicDropped):
-                        _quicDroppedText.Text = ViewModel.QuicDropped.ToString("N0");
-                        break;
-                    case nameof(ViewModel.ActiveRulesCount):
-                    case nameof(ViewModel.AllowlistCount):
-                    case nameof(ViewModel.RamMb):
-                    case nameof(ViewModel.UptimeFormatted):
-                        _engineMetaText.Text = $"Uptime: {ViewModel.UptimeFormatted}  •  Active Rules: {ViewModel.ActiveRulesCount:N0}  •  Exceptions: {ViewModel.AllowlistCount:N0}  •  RAM: {ViewModel.RamMb:F1} MB";
-                        break;
-                }
-            });
+                UpdateUIProperty(e.PropertyName);
+            }
+            else
+            {
+                DispatcherQueue.TryEnqueue(() => UpdateUIProperty(e.PropertyName));
+            }
         };
 
         // Update Subscriptions UI list when changed
         ViewModel.Subscriptions.CollectionChanged += (s, e) =>
         {
-            DispatcherQueue.TryEnqueue(RebuildSubscriptionsUI);
+            if (DispatcherQueue.HasThreadAccess)
+            {
+                RebuildSubscriptionsUI();
+            }
+            else
+            {
+                DispatcherQueue.TryEnqueue(RebuildSubscriptionsUI);
+            }
         };
 
         // Update Allowlist UI list when changed
         ViewModel.AllowlistRules.CollectionChanged += (s, e) =>
         {
-            DispatcherQueue.TryEnqueue(RebuildAllowlistUI);
+            if (DispatcherQueue.HasThreadAccess)
+            {
+                RebuildAllowlistUI();
+            }
+            else
+            {
+                DispatcherQueue.TryEnqueue(RebuildAllowlistUI);
+            }
         };
 
-        // Update Recent Blocked UI list when changed
+        // Update Recent Blocked UI list incrementally when changed
         ViewModel.RecentBlocked.CollectionChanged += (s, e) =>
         {
-            DispatcherQueue.TryEnqueue(RebuildRecentBlockedUI);
+            if (DispatcherQueue.HasThreadAccess)
+            {
+                HandleRecentBlockedCollectionChanged(e);
+            }
+            else
+            {
+                DispatcherQueue.TryEnqueue(() => HandleRecentBlockedCollectionChanged(e));
+            }
         };
 
         _client.Start();
+    }
+
+    private void UpdateUIProperty(string? propertyName)
+    {
+        switch (propertyName)
+        {
+            case nameof(ViewModel.IsConnected):
+                _protectionToggle.IsEnabled = ViewModel.IsConnected;
+                break;
+            case nameof(ViewModel.StatusText):
+                _statusSubtitle.Text = ViewModel.StatusText;
+                break;
+            case nameof(ViewModel.EngineName):
+            case nameof(ViewModel.EngineVersion):
+                string badge = $"{ViewModel.EngineName} {ViewModel.EngineVersion}".Trim().ToUpperInvariant();
+                _engineBadge.Text = string.IsNullOrEmpty(badge) ? "ENGINE" : badge;
+                _trayIcon.UpdateTooltip($"Adblock ({ViewModel.EngineName}) - {(ViewModel.IsRunning ? "Active" : "Paused")}");
+                break;
+            case nameof(ViewModel.IsRunning):
+                if (_protectionToggle.IsOn != ViewModel.IsRunning)
+                {
+                    _isUpdatingToggle = true;
+                    try { _protectionToggle.IsOn = ViewModel.IsRunning; }
+                    finally { _isUpdatingToggle = false; }
+                }
+                _trayIcon.UpdateTooltip($"Adblock ({ViewModel.EngineName}) - {(ViewModel.IsRunning ? "Active" : "Paused")}");
+                break;
+            case nameof(ViewModel.TotalBlocked):
+                _totalBlockedText.Text = ViewModel.TotalBlocked.ToString("N0");
+                break;
+            case nameof(ViewModel.BlockRatePercent):
+                _blockRateText.Text = $"{ViewModel.BlockRatePercent:F1}% Block Rate";
+                break;
+            case nameof(ViewModel.DnsBlocked):
+                _dnsBlockedText.Text = ViewModel.DnsBlocked.ToString("N0");
+                break;
+            case nameof(ViewModel.DnsQueries):
+                _dnsTotalText.Text = $"{ViewModel.DnsQueries:N0} total queries";
+                break;
+            case nameof(ViewModel.TlsBlocked):
+                _tlsBlockedText.Text = ViewModel.TlsBlocked.ToString("N0");
+                break;
+            case nameof(ViewModel.TlsQueries):
+                _tlsTotalText.Text = $"{ViewModel.TlsQueries:N0} total handshakes";
+                break;
+            case nameof(ViewModel.QuicDropped):
+                _quicDroppedText.Text = ViewModel.QuicDropped.ToString("N0");
+                break;
+            case nameof(ViewModel.ActiveRulesCount):
+            case nameof(ViewModel.AllowlistCount):
+            case nameof(ViewModel.RamMb):
+            case nameof(ViewModel.UptimeFormatted):
+                _engineMetaText.Text = $"Uptime: {ViewModel.UptimeFormatted}  •  Active Rules: {ViewModel.ActiveRulesCount:N0}  •  Exceptions: {ViewModel.AllowlistCount:N0}  •  RAM: {ViewModel.RamMb:F1} MB";
+                break;
+        }
+    }
+
+    private void EnsureRecentBlockedPlaceholder()
+    {
+        if (_recentBlockedPanel.Children.Count == 0)
+        {
+            _recentBlockedPanel.Children.Add(_noRecentBlockedPlaceholder);
+        }
+    }
+
+    private void RemoveRecentBlockedPlaceholder()
+    {
+        _recentBlockedPanel.Children.Remove(_noRecentBlockedPlaceholder);
+    }
+
+    private void HandleRecentBlockedCollectionChanged(NotifyCollectionChangedEventArgs e)
+    {
+        switch (e.Action)
+        {
+            case NotifyCollectionChangedAction.Add:
+                if (e.NewItems != null)
+                {
+                    RemoveRecentBlockedPlaceholder();
+                    int insertIndex = e.NewStartingIndex;
+                    foreach (BlockedQueryItemViewModel item in e.NewItems)
+                    {
+                        var card = CreateBlockedCard(item);
+                        if (insertIndex >= 0 && insertIndex <= _recentBlockedPanel.Children.Count)
+                        {
+                            _recentBlockedPanel.Children.Insert(insertIndex, card);
+                            insertIndex++;
+                        }
+                        else
+                        {
+                            _recentBlockedPanel.Children.Insert(0, card);
+                        }
+                    }
+                    while (_recentBlockedPanel.Children.Count > 30)
+                    {
+                        _recentBlockedPanel.Children.RemoveAt(_recentBlockedPanel.Children.Count - 1);
+                    }
+                }
+                break;
+
+            case NotifyCollectionChangedAction.Remove:
+                if (e.OldStartingIndex >= 0 && e.OldStartingIndex < _recentBlockedPanel.Children.Count)
+                {
+                    _recentBlockedPanel.Children.RemoveAt(e.OldStartingIndex);
+                }
+                EnsureRecentBlockedPlaceholder();
+                break;
+
+            case NotifyCollectionChangedAction.Reset:
+                _recentBlockedPanel.Children.Clear();
+                if (ViewModel.RecentBlocked.Count == 0)
+                {
+                    EnsureRecentBlockedPlaceholder();
+                }
+                else
+                {
+                    foreach (var item in ViewModel.RecentBlocked.Take(30))
+                    {
+                        _recentBlockedPanel.Children.Add(CreateBlockedCard(item));
+                    }
+                }
+                break;
+        }
+    }
+
+    private UIElement CreateBlockedCard(BlockedQueryItemViewModel item)
+    {
+        var rowBorder = new Border
+        {
+            Background = new SolidColorBrush(Color.FromArgb(255, 30, 30, 34)),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(255, 42, 42, 48)),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(6),
+            Padding = new Thickness(14, 10, 14, 10)
+        };
+
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(70) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(60) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        var timeBlock = new TextBlock
+        {
+            Text = item.TimeFormatted,
+            FontSize = 12,
+            Foreground = new SolidColorBrush(Color.FromArgb(180, 160, 160, 160)),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+
+        bool isDns = item.Protocol.Equals("DNS", StringComparison.OrdinalIgnoreCase);
+        var protoBadge = new Border
+        {
+            Background = new SolidColorBrush(isDns ? Color.FromArgb(40, 0, 230, 118) : Color.FromArgb(40, 0, 229, 255)),
+            CornerRadius = new CornerRadius(3),
+            Padding = new Thickness(6, 2, 6, 2),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            Child = new TextBlock
+            {
+                Text = item.Protocol,
+                FontSize = 11,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = new SolidColorBrush(isDns ? Color.FromArgb(255, 0, 230, 118) : Color.FromArgb(255, 0, 229, 255))
+            }
+        };
+
+        var detailStack = new StackPanel { Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
+        detailStack.Children.Add(new TextBlock
+        {
+            Text = item.Domain,
+            FontSize = 14,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = new SolidColorBrush(Colors.White)
+        });
+
+        string reason = string.IsNullOrEmpty(item.MatchedRule) ? "Matched ad/tracker blocklist" : item.MatchedRule;
+        detailStack.Children.Add(new TextBlock
+        {
+            Text = reason,
+            FontSize = 11,
+            Foreground = new SolidColorBrush(Color.FromArgb(180, 255, 110, 110))
+        });
+
+        var allowBtn = new Button
+        {
+            Content = "Allow",
+            FontSize = 12,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        allowBtn.Click += async (s, e) =>
+        {
+            await ViewModel.AllowBlockedDomainAsync(item.Domain);
+            allowBtn.Content = "Allowed ✓";
+            allowBtn.IsEnabled = false;
+        };
+
+        Grid.SetColumn(timeBlock, 0);
+        Grid.SetColumn(protoBadge, 1);
+        Grid.SetColumn(detailStack, 2);
+        Grid.SetColumn(allowBtn, 3);
+
+        grid.Children.Add(timeBlock);
+        grid.Children.Add(protoBadge);
+        grid.Children.Add(detailStack);
+        grid.Children.Add(allowBtn);
+
+        rowBorder.Child = grid;
+        return rowBorder;
+    }
+
+    private void OnQueryLogContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
+    {
+        if (args.InRecycleQueue) return;
+        if (args.Item is not QueryLogItemViewModel item) return;
+
+        QueryLogRowHolder holder;
+        if (args.ItemContainer.Content is Grid rowGrid && rowGrid.Tag is QueryLogRowHolder existingHolder)
+        {
+            holder = existingHolder;
+        }
+        else
+        {
+            rowGrid = new Grid
+            {
+                Padding = new Thickness(10, 6, 10, 6),
+                ColumnSpacing = 12
+            };
+            rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(70) });
+            rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(55) });
+            rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(85) });
+            rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(200) });
+
+            var timeText = new TextBlock
+            {
+                FontSize = 12,
+                Foreground = new SolidColorBrush(Color.FromArgb(180, 160, 160, 160)),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            var protoText = new TextBlock
+            {
+                FontSize = 11,
+                FontWeight = FontWeights.SemiBold,
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+            var protoBadge = new Border
+            {
+                CornerRadius = new CornerRadius(3),
+                Padding = new Thickness(6, 2, 6, 2),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Center,
+                Child = protoText
+            };
+
+            var actionText = new TextBlock
+            {
+                FontSize = 11,
+                FontWeight = FontWeights.Bold,
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+            var actionBadge = new Border
+            {
+                CornerRadius = new CornerRadius(3),
+                Padding = new Thickness(6, 2, 6, 2),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Center,
+                Child = actionText
+            };
+
+            var domainText = new TextBlock
+            {
+                FontSize = 13,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = new SolidColorBrush(Colors.White),
+                VerticalAlignment = VerticalAlignment.Center,
+                TextTrimming = TextTrimming.CharacterEllipsis
+            };
+
+            var reasonText = new TextBlock
+            {
+                FontSize = 11,
+                Foreground = new SolidColorBrush(Color.FromArgb(160, 160, 160, 160)),
+                VerticalAlignment = VerticalAlignment.Center,
+                TextTrimming = TextTrimming.CharacterEllipsis
+            };
+
+            Grid.SetColumn(timeText, 0);
+            Grid.SetColumn(protoBadge, 1);
+            Grid.SetColumn(actionBadge, 2);
+            Grid.SetColumn(domainText, 3);
+            Grid.SetColumn(reasonText, 4);
+
+            rowGrid.Children.Add(timeText);
+            rowGrid.Children.Add(protoBadge);
+            rowGrid.Children.Add(actionBadge);
+            rowGrid.Children.Add(domainText);
+            rowGrid.Children.Add(reasonText);
+
+            holder = new QueryLogRowHolder
+            {
+                TimeText = timeText,
+                ProtoBadge = protoBadge,
+                ProtoText = protoText,
+                ActionBadge = actionBadge,
+                ActionText = actionText,
+                DomainText = domainText,
+                ReasonText = reasonText
+            };
+            rowGrid.Tag = holder;
+            args.ItemContainer.Content = rowGrid;
+        }
+
+        holder.TimeText.Text = item.TimeFormatted;
+        holder.ProtoText.Text = item.Protocol;
+        holder.ActionText.Text = item.Action;
+        holder.DomainText.Text = item.Domain;
+        holder.ReasonText.Text = item.Reason;
+
+        bool isDns = item.Protocol.Equals("DNS", StringComparison.OrdinalIgnoreCase);
+        holder.ProtoBadge.Background = new SolidColorBrush(isDns ? Color.FromArgb(40, 0, 230, 118) : Color.FromArgb(40, 0, 229, 255));
+        holder.ProtoText.Foreground = new SolidColorBrush(isDns ? Color.FromArgb(255, 0, 230, 118) : Color.FromArgb(255, 0, 229, 255));
+
+        if (item.IsBlocked)
+        {
+            holder.ActionBadge.Background = new SolidColorBrush(Color.FromArgb(50, 255, 82, 82));
+            holder.ActionText.Foreground = new SolidColorBrush(Color.FromArgb(255, 255, 82, 82));
+        }
+        else
+        {
+            holder.ActionBadge.Background = new SolidColorBrush(Color.FromArgb(40, 0, 230, 118));
+            holder.ActionText.Foreground = new SolidColorBrush(Color.FromArgb(255, 0, 230, 118));
+        }
+
+        args.Handled = true;
     }
 
     private UIElement BuildRootLayout()
@@ -548,7 +887,7 @@ public class MainWindow : Window
         stack.Children.Add(recentHeader);
 
         stack.Children.Add(_recentBlockedPanel);
-        RebuildRecentBlockedUI();
+        EnsureRecentBlockedPlaceholder();
 
         scroll.Content = stack;
         return scroll;
@@ -575,109 +914,6 @@ public class MainWindow : Window
         cardStack.Children.Add(subtitleBlock);
         border.Child = cardStack;
         return border;
-    }
-
-    private void RebuildRecentBlockedUI()
-    {
-        _recentBlockedPanel.Children.Clear();
-
-        if (ViewModel.RecentBlocked.Count == 0)
-        {
-            _recentBlockedPanel.Children.Add(new TextBlock
-            {
-                Text = "No blocked queries recorded yet. Blocked DNS and TLS connections will appear here in real-time.",
-                FontSize = 13,
-                Foreground = new SolidColorBrush(Color.FromArgb(160, 160, 160, 160)),
-                Margin = new Thickness(0, 12, 0, 0)
-            });
-            return;
-        }
-
-        foreach (var item in ViewModel.RecentBlocked.Take(30))
-        {
-            var rowBorder = new Border
-            {
-                Background = new SolidColorBrush(Color.FromArgb(255, 30, 30, 34)),
-                BorderBrush = new SolidColorBrush(Color.FromArgb(255, 42, 42, 48)),
-                BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(6),
-                Padding = new Thickness(14, 10, 14, 10)
-            };
-
-            var grid = new Grid();
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(70) });  // Time
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(60) });  // Proto
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }); // Domain & Rule
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto }); // Allow Button
-
-            var timeBlock = new TextBlock
-            {
-                Text = item.TimeFormatted,
-                FontSize = 12,
-                Foreground = new SolidColorBrush(Color.FromArgb(180, 160, 160, 160)),
-                VerticalAlignment = VerticalAlignment.Center
-            };
-
-            bool isDns = item.Protocol.Equals("DNS", StringComparison.OrdinalIgnoreCase);
-            var protoBadge = new Border
-            {
-                Background = new SolidColorBrush(isDns ? Color.FromArgb(40, 0, 230, 118) : Color.FromArgb(40, 0, 229, 255)),
-                CornerRadius = new CornerRadius(3),
-                Padding = new Thickness(6, 2, 6, 2),
-                HorizontalAlignment = HorizontalAlignment.Left,
-                VerticalAlignment = VerticalAlignment.Center,
-                Child = new TextBlock
-                {
-                    Text = item.Protocol,
-                    FontSize = 11,
-                    FontWeight = FontWeights.SemiBold,
-                    Foreground = new SolidColorBrush(isDns ? Color.FromArgb(255, 0, 230, 118) : Color.FromArgb(255, 0, 229, 255))
-                }
-            };
-
-            var detailStack = new StackPanel { Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
-            detailStack.Children.Add(new TextBlock
-            {
-                Text = item.Domain,
-                FontSize = 14,
-                FontWeight = FontWeights.SemiBold,
-                Foreground = new SolidColorBrush(Colors.White)
-            });
-
-            string reason = string.IsNullOrEmpty(item.MatchedRule) ? "Matched ad/tracker blocklist" : item.MatchedRule;
-            detailStack.Children.Add(new TextBlock
-            {
-                Text = reason,
-                FontSize = 11,
-                Foreground = new SolidColorBrush(Color.FromArgb(180, 255, 110, 110))
-            });
-
-            var allowBtn = new Button
-            {
-                Content = "Allow",
-                FontSize = 12,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            allowBtn.Click += async (s, e) =>
-            {
-                await ViewModel.AllowBlockedDomainAsync(item.Domain);
-                allowBtn.Content = "Allowed ✓";
-                allowBtn.IsEnabled = false;
-            };
-
-            Grid.SetColumn(timeBlock, 0);
-            Grid.SetColumn(protoBadge, 1);
-            Grid.SetColumn(detailStack, 2);
-            Grid.SetColumn(allowBtn, 3);
-
-            grid.Children.Add(timeBlock);
-            grid.Children.Add(protoBadge);
-            grid.Children.Add(detailStack);
-            grid.Children.Add(allowBtn);
-
-            rowBorder.Child = grid;
-            _recentBlockedPanel.Children.Add(rowBorder);
-        }
     }
 
     private UIElement BuildListsContent()
@@ -861,7 +1097,7 @@ public class MainWindow : Window
         var scroll = new ScrollViewer { Padding = new Thickness(16) };
         var stack = new StackPanel { Spacing = 20 };
 
-        // Add Allowlist Card
+        // Add Rule Card
         var addCard = new Border
         {
             Background = new SolidColorBrush(Color.FromArgb(255, 32, 32, 36)),
@@ -873,7 +1109,7 @@ public class MainWindow : Window
         var addStack = new StackPanel { Spacing = 12 };
         addStack.Children.Add(new TextBlock
         {
-            Text = "Add Custom Allowlist Rule / Exception",
+            Text = "Add Allowlist Exception Rule",
             FontSize = 15,
             FontWeight = FontWeights.SemiBold,
             Foreground = new SolidColorBrush(Colors.White)
@@ -882,7 +1118,7 @@ public class MainWindow : Window
         var inputRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
         inputRow.Children.Add(_allowlistInput);
 
-        var addBtn = new Button { Content = "Add Exception" };
+        var addBtn = new Button { Content = "Add Rule" };
         addBtn.Click += async (s, e) =>
         {
             string rule = _allowlistInput.Text.Trim();
@@ -894,7 +1130,7 @@ public class MainWindow : Window
         };
         inputRow.Children.Add(addBtn);
 
-        var clearBtn = new Button { Content = "Clear All" };
+        var clearBtn = new Button { Content = "Clear All Exceptions" };
         clearBtn.Click += async (s, e) =>
         {
             await _allowlist.ClearRulesAsync();
@@ -979,7 +1215,8 @@ public class MainWindow : Window
 
     private UIElement BuildQueryLogContent()
     {
-        var grid = new Grid { Padding = new Thickness(16), RowSpacing = 12 };
+        var grid = new Grid { Padding = new Thickness(16), RowSpacing = 10 };
+        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
@@ -1004,10 +1241,48 @@ public class MainWindow : Window
         Grid.SetRow(topBar, 0);
         grid.Children.Add(topBar);
 
-        Grid.SetRow(_queryLogListView, 1);
+        // Header Row for Query Log Table
+        var headerRow = new Grid
+        {
+            Padding = new Thickness(22, 6, 22, 6),
+            ColumnSpacing = 12,
+            Background = new SolidColorBrush(Color.FromArgb(255, 30, 30, 34)),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(255, 42, 42, 48)),
+            BorderThickness = new Thickness(0, 0, 0, 1)
+        };
+        headerRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(70) });
+        headerRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(55) });
+        headerRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(85) });
+        headerRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        headerRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(200) });
+
+        headerRow.Children.Add(CreateHeaderLabel("TIME", 0));
+        headerRow.Children.Add(CreateHeaderLabel("PROTO", 1));
+        headerRow.Children.Add(CreateHeaderLabel("ACTION", 2));
+        headerRow.Children.Add(CreateHeaderLabel("DOMAIN", 3));
+        headerRow.Children.Add(CreateHeaderLabel("RULE / REASON", 4));
+
+        Grid.SetRow(headerRow, 1);
+        grid.Children.Add(headerRow);
+
+        Grid.SetRow(_queryLogListView, 2);
         grid.Children.Add(_queryLogListView);
 
         return grid;
+    }
+
+    private static TextBlock CreateHeaderLabel(string text, int column)
+    {
+        var tb = new TextBlock
+        {
+            Text = text,
+            FontSize = 11,
+            FontWeight = FontWeights.Bold,
+            Foreground = new SolidColorBrush(Color.FromArgb(160, 160, 160, 160)),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        Grid.SetColumn(tb, column);
+        return tb;
     }
 
     private static AppWindow? GetAppWindow(IntPtr hWnd)

@@ -35,7 +35,24 @@ public class TrayIconService : IDisposable
         public int Y;
     }
 
-    private delegate IntPtr SubclassProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam, UIntPtr uIdSubclass, IntPtr dwRefData);
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct WNDCLASSEX
+    {
+        public int cbSize;
+        public int style;
+        public WndProc lpfnWndProc;
+        public int cbClsExtra;
+        public int cbWndExtra;
+        public IntPtr hInstance;
+        public IntPtr hIcon;
+        public IntPtr hCursor;
+        public IntPtr hbrBackground;
+        public string? lpszMenuName;
+        public string lpszClassName;
+        public IntPtr hIconSm;
+    }
+
+    private delegate IntPtr WndProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam);
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool Shell_NotifyIconW(int dwMessage, ref NOTIFYICONDATAW lpData);
@@ -64,14 +81,22 @@ public class TrayIconService : IDisposable
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
-    [DllImport("comctl32.dll", SetLastError = true)]
-    private static extern bool SetWindowSubclass(IntPtr hWnd, SubclassProc pfnSubclass, UIntPtr uIdSubclass, IntPtr dwRefData);
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern ushort RegisterClassExW(ref WNDCLASSEX lpwcx);
 
-    [DllImport("comctl32.dll", SetLastError = true)]
-    private static extern IntPtr DefSubclassProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern IntPtr CreateWindowExW(
+        uint dwExStyle, string lpClassName, string lpWindowName, uint dwStyle,
+        int x, int y, int nWidth, int nHeight, IntPtr hWndParent, IntPtr hMenu, IntPtr hInstance, IntPtr lpParam);
 
-    [DllImport("comctl32.dll", SetLastError = true)]
-    private static extern bool RemoveWindowSubclass(IntPtr hWnd, SubclassProc pfnSubclass, UIntPtr uIdSubclass);
+    [DllImport("user32.dll")]
+    private static extern IntPtr DefWindowProcW(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool DestroyWindow(IntPtr hWnd);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr GetModuleHandle(string? lpModuleName);
 
     private const int NIM_ADD = 0x00000000;
     private const int NIM_MODIFY = 0x00000001;
@@ -88,6 +113,7 @@ public class TrayIconService : IDisposable
     private const int WM_LBUTTONUP = 0x0202;
     private const int WM_LBUTTONDBLCLK = 0x0203;
     private const int WM_RBUTTONUP = 0x0205;
+    private const int WM_CONTEXTMENU = 0x007B;
 
     private const uint MF_STRING = 0x00000000;
     private const uint MF_GRAYED = 0x00000001;
@@ -97,13 +123,16 @@ public class TrayIconService : IDisposable
     private const uint TPM_RIGHTBUTTON = 0x0002;
 
     private const int SW_HIDE = 0;
+    private const int SW_SHOW = 5;
     private const int SW_RESTORE = 9;
 
     private static readonly IntPtr IDI_SHIELD = new IntPtr(32518);
     private static readonly IntPtr IDI_APPLICATION = new IntPtr(32512);
+    private static readonly IntPtr HWND_MESSAGE = new IntPtr(-3);
 
-    private readonly IntPtr _hWnd;
-    private readonly SubclassProc _subclassProc;
+    private readonly IntPtr _mainHwnd;
+    private readonly IntPtr _msgHwnd;
+    private readonly WndProc _wndProc;
     private NOTIFYICONDATAW _nid;
     private bool _isCreated;
 
@@ -113,12 +142,23 @@ public class TrayIconService : IDisposable
     public Action? OpenDashboardAction { get; set; }
     public Action? ExitAction { get; set; }
 
-    public TrayIconService(IntPtr hWnd)
+    public TrayIconService(IntPtr mainHwnd)
     {
-        _hWnd = hWnd;
-        _subclassProc = WindowSubclassProc;
+        _mainHwnd = mainHwnd;
+        _wndProc = MsgWindowWndProc;
 
-        SetWindowSubclass(_hWnd, _subclassProc, new UIntPtr(101), IntPtr.Zero);
+        // Create an isolated message-only window so we never hook or subclass the WinUI 3 Window
+        string className = "AdblockTrayMsgWnd_" + Guid.NewGuid().ToString("N");
+        var wc = new WNDCLASSEX
+        {
+            cbSize = Marshal.SizeOf<WNDCLASSEX>(),
+            lpfnWndProc = _wndProc,
+            hInstance = GetModuleHandle(null),
+            lpszClassName = className
+        };
+        RegisterClassExW(ref wc);
+
+        _msgHwnd = CreateWindowExW(0, className, "AdblockTrayMsg", 0, 0, 0, 0, 0, HWND_MESSAGE, IntPtr.Zero, wc.hInstance, IntPtr.Zero);
         InitializeTrayIcon();
     }
 
@@ -130,10 +170,12 @@ public class TrayIconService : IDisposable
             hIcon = LoadIcon(IntPtr.Zero, IDI_APPLICATION);
         }
 
+        IntPtr targetHwnd = _msgHwnd != IntPtr.Zero ? _msgHwnd : _mainHwnd;
+
         _nid = new NOTIFYICONDATAW
         {
             cbSize = Marshal.SizeOf<NOTIFYICONDATAW>(),
-            hWnd = _hWnd,
+            hWnd = targetHwnd,
             uID = 1001,
             uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP,
             uCallbackMessage = (int)WM_TRAYICON,
@@ -164,34 +206,34 @@ public class TrayIconService : IDisposable
 
     public void RestoreWindow()
     {
-        ShowWindow(_hWnd, SW_RESTORE);
-        SetForegroundWindow(_hWnd);
+        ShowWindow(_mainHwnd, SW_RESTORE);
+        SetForegroundWindow(_mainHwnd);
         OpenDashboardAction?.Invoke();
     }
 
     public void HideWindow()
     {
-        ShowWindow(_hWnd, SW_HIDE);
+        ShowWindow(_mainHwnd, SW_HIDE);
     }
 
-    private IntPtr WindowSubclassProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam, UIntPtr uIdSubclass, IntPtr dwRefData)
+    private IntPtr MsgWindowWndProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam)
     {
         if (uMsg == WM_TRAYICON)
         {
-            int mouseMsg = lParam.ToInt32();
+            int mouseMsg = (int)(lParam.ToInt64() & 0xFFFF);
             if (mouseMsg == WM_LBUTTONUP || mouseMsg == WM_LBUTTONDBLCLK)
             {
                 RestoreWindow();
                 return IntPtr.Zero;
             }
-            else if (mouseMsg == WM_RBUTTONUP)
+            else if (mouseMsg == WM_RBUTTONUP || mouseMsg == WM_CONTEXTMENU)
             {
                 ShowContextMenu();
                 return IntPtr.Zero;
             }
         }
 
-        return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+        return DefWindowProcW(hWnd, uMsg, wParam, lParam);
     }
 
     private void ShowContextMenu()
@@ -213,8 +255,8 @@ public class TrayIconService : IDisposable
         AppendMenuW(menu, MF_STRING, new UIntPtr(1003), "Exit");
 
         GetCursorPos(out var pt);
-        SetForegroundWindow(_hWnd);
-        uint cmd = TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.X, pt.Y, _hWnd, IntPtr.Zero);
+        SetForegroundWindow(_msgHwnd != IntPtr.Zero ? _msgHwnd : _mainHwnd);
+        uint cmd = TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.X, pt.Y, _msgHwnd != IntPtr.Zero ? _msgHwnd : _mainHwnd, IntPtr.Zero);
         DestroyMenu(menu);
 
         if (cmd == 1001)
@@ -238,7 +280,9 @@ public class TrayIconService : IDisposable
             Shell_NotifyIconW(NIM_DELETE, ref _nid);
             _isCreated = false;
         }
-        RemoveWindowSubclass(_hWnd, _subclassProc, new UIntPtr(101));
+        if (_msgHwnd != IntPtr.Zero)
+        {
+            DestroyWindow(_msgHwnd);
+        }
     }
 }
-
