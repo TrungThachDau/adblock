@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "AdblockApp": {
+      "commandName": "Project",
+      "nativeDebugging": false
+    }
+  }
+}

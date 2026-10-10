@@ -241,3 +241,4 @@ public class TrayIconService : IDisposable
         RemoveWindowSubclass(_hWnd, _subclassProc, new UIntPtr(101));
     }
 }
+
