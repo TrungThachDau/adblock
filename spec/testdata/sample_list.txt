@@ -1,0 +1,55 @@
+! -------------------------------------------------------------
+! Sample Adblock Filter List for Spec Compliance Testing
+! -------------------------------------------------------------
+! Comments starting with exclamation marks should be ignored
+# Comments starting with hash marks should also be ignored
+
+! --- Valid ABP Block Rules (||host^) ---
+||adservice.google.com^
+||analytics.tracker.net^
+||telemetry.adnetwork.org^
+||evil-tracker.co.uk^
+
+! --- Valid ABP Allowlist / Exception Rules (@@||host^) ---
+! Allowlist takes priority over blocklist rules
+@@||safe.adservice.google.com^
+@@||cdn.analytics.tracker.net^
+@@||trusted.evil-tracker.co.uk^
+
+! --- Valid Hosts Format Entries ---
+0.0.0.0 bad-host.com banner.bad-host.com
+127.0.0.1 malicious-tracker.net # inline comment should be stripped
+::1 ipv6-adserver.com
+
+! --- Valid Plain Domain Entries ---
+plain-ad.com
+popup-network.biz
+spyware-domain.xyz
+
+! --- Rules to SKIP: Path Syntax (/) ---
+||example-path.com/ads/*
+example-path.com/banner.js
+/ad-rotator/
+
+! --- Rules to SKIP: Wildcards (*) ---
+||*click*.com^
+ad*.tracking.org
+*wildcard-ad*.net
+
+! --- Rules to SKIP: Element Hiding / Cosmetic (##, #?#, #@#, #$#) ---
+example.com##.sponsor-banner
+###ad-frame
+clean-site.org##div[class="advert"]
+forum.net#@#.whitelist-banner
+
+! --- Rules to SKIP: Option Modifiers ($domain=, $script, etc.) ---
+||track.com^$domain=news.com
+||script-block.com^$script,third-party
+||image-ad.com^$image
+
+! --- Rules to SKIP: Loopback / Localhost ---
+127.0.0.1 localhost
+::1 localhost
+0.0.0.0 local
+
+! End of test list

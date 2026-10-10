@@ -127,7 +127,72 @@ function Test-EngineIpc {
             throw "Failed unknown method handling: $($r8 | ConvertTo-Json -Compress)"
         }
 
-        Write-Host "`n>>> ${EngineName}: ALL IPC TESTS PASSED! Spec fully validated." -ForegroundColor Green
+        # 9. IPC.md Command: get_status (with name/version/RAM)
+        Write-Host "9. Testing IPC.md get_status (name/version)... " -NoNewline
+        $r9 = Invoke-Rpc -Method "get_status" -Id 111
+        if ($r9.result.name -and $r9.result.version -and $null -ne $r9.result.uptime_seconds) {
+            Write-Host "PASSED [name: $($r9.result.name), v: $($r9.result.version)]" -ForegroundColor Green
+        } else {
+            throw "Failed get_status command"
+        }
+
+        # 10. IPC.md Command: get_stats (allowed/blocked counters, RAM)
+        Write-Host "10. Testing IPC.md get_stats (allowed/blocked/RAM)... " -NoNewline
+        $r10 = Invoke-Rpc -Method "get_stats" -Id 112
+        if ($null -ne $r10.result.allowed_count -and $null -ne $r10.result.blocked_count -and $r10.result.ram_bytes -ge 0) {
+            Write-Host "PASSED [ram: $($r10.result.ram_mb) MB, ram_bytes: $($r10.result.ram_bytes)]" -ForegroundColor Green
+        } else {
+            throw "Failed get_stats command"
+        }
+
+        # 11. IPC.md Command: set_lists (spec/testdata/sample_list.txt)
+        Write-Host "11. Testing IPC.md set_lists... " -NoNewline
+        $sampleListPath = "D:\adblock\spec\testdata\sample_list.txt"
+        $r11 = Invoke-Rpc -Method "set_lists" -Params @{ paths = @($sampleListPath) } -Id 113
+        if ($r11.result.status -eq "ok" -and $r11.result.loaded_lists -ge 1) {
+            Write-Host "PASSED [loaded: $($r11.result.loaded_lists), rules: $($r11.result.active_rules_count)]" -ForegroundColor Green
+        } else {
+            throw "Failed set_lists command: $($r11 | ConvertTo-Json -Compress)"
+        }
+
+        # 12. IPC.md Command: set_allowlist
+        Write-Host "12. Testing IPC.md set_allowlist... " -NoNewline
+        $r12 = Invoke-Rpc -Method "set_allowlist" -Params @{ rules = @("@@||custom-safe.org^", "safe.mycorp.net") } -Id 114
+        if ($r12.result.status -eq "ok" -and $r12.result.allowlist_count -ge 2) {
+            Write-Host "PASSED [allowlist_count: $($r12.result.allowlist_count)]" -ForegroundColor Green
+        } else {
+            throw "Failed set_allowlist command: $($r12 | ConvertTo-Json -Compress)"
+        }
+
+        # 13. IPC.md Command: reload
+        Write-Host "13. Testing IPC.md reload... " -NoNewline
+        $r13 = Invoke-Rpc -Method "reload" -Id 115
+        if ($r13.result.status -eq "ok" -and $r13.result.active_rules_count -ge 1) {
+            Write-Host "PASSED [active_rules: $($r13.result.active_rules_count), allowlist: $($r13.result.allowlist_count)]" -ForegroundColor Green
+        } else {
+            throw "Failed reload command"
+        }
+
+        # 14. IPC.md Command: get_recent_blocked
+        Write-Host "14. Testing IPC.md get_recent_blocked... " -NoNewline
+        $r14 = Invoke-Rpc -Method "get_recent_blocked" -Params @{ limit = 10 } -Id 116
+        if ($null -ne $r14.result.items) {
+            Write-Host "PASSED [items returned: $($r14.result.items.Count)]" -ForegroundColor Green
+        } else {
+            throw "Failed get_recent_blocked command"
+        }
+
+        # 15. IPC.md Commands: stop and start
+        Write-Host "15. Testing IPC.md stop and start... " -NoNewline
+        $r15a = Invoke-Rpc -Method "stop" -Id 117
+        $r15b = Invoke-Rpc -Method "start" -Id 118
+        if ($r15a.result.state -eq "stopped" -and $r15b.result.state -eq "running") {
+            Write-Host "PASSED [stopped -> running]" -ForegroundColor Green
+        } else {
+            throw "Failed stop/start commands"
+        }
+
+        Write-Host "`n>>> ${EngineName}: ALL IPC & IPC.MD TESTS PASSED! Spec fully validated." -ForegroundColor Green
 
         $pipeClient.Dispose()
     }

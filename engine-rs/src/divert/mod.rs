@@ -97,7 +97,7 @@ pub fn run_packet_loop(
                     // Original query is DROPPED
 
                     let log_id = state.next_log_id().to_string();
-                    broadcaster.send_log(QueryLogEntry {
+                    let entry = QueryLogEntry {
                         id: log_id,
                         timestamp,
                         protocol: "DNS".to_string(),
@@ -105,7 +105,9 @@ pub fn run_packet_loop(
                         domain,
                         action: "blocked".to_string(),
                         reason: format!("Rule match: {}", rule),
-                    });
+                    };
+                    state.record_blocked(entry.clone());
+                    broadcaster.send_log(entry);
                 } else {
                     // Allowed
                     let _ = api.send(handle, packet, &addr);
@@ -141,7 +143,7 @@ pub fn run_packet_loop(
                         // Original ClientHello is DROPPED
 
                         let log_id = state.next_log_id().to_string();
-                        broadcaster.send_log(QueryLogEntry {
+                        let entry = QueryLogEntry {
                             id: log_id,
                             timestamp,
                             protocol: "TLS".to_string(),
@@ -149,7 +151,9 @@ pub fn run_packet_loop(
                             domain: sni,
                             action: "blocked".to_string(),
                             reason: format!("Rule match: {}", rule),
-                        });
+                        };
+                        state.record_blocked(entry.clone());
+                        broadcaster.send_log(entry);
                     } else {
                         // Allowed
                         let _ = api.send(handle, packet, &addr);

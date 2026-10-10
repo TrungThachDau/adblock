@@ -36,6 +36,41 @@ fn test_spec_domain_matching_vectors() {
 }
 
 #[test]
+fn test_spec_testdata_cases() {
+    let list_file = Path::new("../spec/testdata/sample_list.txt");
+    let list_path = if list_file.exists() {
+        list_file
+    } else {
+        Path::new("spec/testdata/sample_list.txt")
+    };
+
+    let cases_file = Path::new("../spec/testdata/cases.json");
+    let cases_content = if cases_file.exists() {
+        fs::read_to_string(cases_file).unwrap()
+    } else {
+        fs::read_to_string("spec/testdata/cases.json").unwrap()
+    };
+
+    let mut store = adblock_engine_rs::rules::RuleStore::new();
+    let loaded = store.load_file(list_path).unwrap();
+    assert!(loaded > 0, "Expected to load rules from sample_list.txt");
+
+    let cases: Vec<serde_json::Value> = serde_json::from_str(&cases_content).unwrap();
+    for case in cases {
+        let host = case["host"].as_str().unwrap();
+        let expected_blocked = case["expected_blocked"].as_bool().unwrap();
+        let desc = case["description"].as_str().unwrap_or(host);
+
+        let is_blocked = store.check(host).is_some();
+        assert_eq!(
+            is_blocked, expected_blocked,
+            "Failed testdata case: '{}' ({}) expected_blocked: {}, actual: {}",
+            host, desc, expected_blocked, is_blocked
+        );
+    }
+}
+
+#[test]
 fn test_spec_packet_hex_vectors() {
     let packet_file = Path::new("../spec/test-data/packets.json");
     let content = if packet_file.exists() {

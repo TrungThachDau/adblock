@@ -502,3 +502,4 @@ public class MainWindow : Window
         await ViewModel.RefreshRulesAsync();
     }
 }
+

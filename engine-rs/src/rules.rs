@@ -5,12 +5,125 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::Arc;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParsedRule {
+    Block(String),
+    Allow(String),
+}
+
+/// Normalizes a hostname according to spec/blocklist-rules.md:
+/// - Strips leading/trailing dots and whitespace
+/// - ASCII lowercase
+/// - Validates character set ([a-z0-9-_.]), checks for empty labels
+pub fn normalize_domain(raw: &str) -> Option<String> {
+    let clean = raw.trim().trim_matches('.').to_ascii_lowercase();
+    if clean.is_empty() {
+        return None;
+    }
+    // Must be valid hostname characters
+    if !clean.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+        return None;
+    }
+    // Labels cannot be empty
+    if clean.split('.').any(|label| label.is_empty()) {
+        return None;
+    }
+    Some(clean)
+}
+
+fn is_reserved_host(host: &str) -> bool {
+    let lower = host.trim().trim_matches('.').to_ascii_lowercase();
+    matches!(lower.as_str(), "localhost" | "local" | "broadcasthost")
+}
+
+/// Parses a single line from an adblock/hosts list according to spec/blocklist-rules.md
+pub fn parse_line(line: &str) -> Vec<ParsedRule> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('!') || trimmed.starts_with('#') {
+        return Vec::new();
+    }
+
+    // Skip rules containing path (/), options ($), cosmetic selectors (##, #?#, #@#, #$#)
+    if trimmed.contains('/') || trimmed.contains('$') {
+        return Vec::new();
+    }
+    if trimmed.contains("##") || trimmed.contains("#?#") || trimmed.contains("#@#") || trimmed.contains("#$#") {
+        return Vec::new();
+    }
+
+    // Handle wildcard skip: if contains '*', skip unless it is a leading wildcard prefix '*.domain'
+    if trimmed.contains('*') {
+        if let Some(suffix) = trimmed.strip_prefix("*.") {
+            if !suffix.contains('*') {
+                if let Some(valid) = normalize_domain(suffix) {
+                    return vec![ParsedRule::Block(valid)];
+                }
+            }
+        }
+        return Vec::new();
+    }
+
+    // 1. ABP Allowlist @@||host^
+    if let Some(rest) = trimmed.strip_prefix("@@||") {
+        let domain = rest.trim_end_matches('^');
+        if let Some(valid) = normalize_domain(domain) {
+            return vec![ParsedRule::Allow(valid)];
+        }
+        return Vec::new();
+    }
+
+    // 2. ABP Block ||host^
+    if let Some(rest) = trimmed.strip_prefix("||") {
+        let domain = rest.trim_end_matches('^');
+        if let Some(valid) = normalize_domain(domain) {
+            return vec![ParsedRule::Block(valid)];
+        }
+        return Vec::new();
+    }
+
+    // 3. Hosts format (strip inline comments first)
+    let no_comment = if let Some(idx) = trimmed.find('#') {
+        trimmed[..idx].trim()
+    } else {
+        trimmed
+    };
+
+    let parts: Vec<&str> = no_comment.split_whitespace().collect();
+    if parts.len() >= 2 {
+        let ip = parts[0];
+        if matches!(ip, "0.0.0.0" | "127.0.0.1" | "::1" | "::" | "0") {
+            let mut result = Vec::new();
+            for host in &parts[1..] {
+                if is_reserved_host(host) {
+                    continue;
+                }
+                if let Some(valid) = normalize_domain(host) {
+                    result.push(ParsedRule::Block(valid));
+                }
+            }
+            return result;
+        }
+    }
+
+    // 4. Plain domain
+    if !trimmed.contains(char::is_whitespace) {
+        if is_reserved_host(trimmed) {
+            return Vec::new();
+        }
+        if let Some(valid) = normalize_domain(trimmed) {
+            return vec![ParsedRule::Block(valid)];
+        }
+    }
+
+    Vec::new()
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RuleStore {
-    // Exact domain rules (or normalized base domains)
-    exact_rules: HashSet<String>,
-    // Wildcard / suffix rules (e.g. "doubleclick.net" matches any "*.doubleclick.net")
-    suffix_rules: HashSet<String>,
+    // Suffix rules for blocking (e.g. "doubleclick.net" matches "doubleclick.net" and "*.doubleclick.net")
+    block_rules: HashSet<String>,
+    // Suffix rules for allowlisting (priority over block_rules)
+    allowlist_rules: HashSet<String>,
     // Ordered raw rules list for deterministic pagination in UI
     ordered_rules: Vec<String>,
 }
@@ -20,57 +133,72 @@ impl RuleStore {
         Self::default()
     }
 
-    /// Normalize a domain: lowercase, strip whitespace, strip leading/trailing dots and "*."
-    pub fn normalize_rule(rule: &str) -> (String, bool) {
-        let trimmed = rule.trim().to_ascii_lowercase();
-        if let Some(wildcard) = trimmed.strip_prefix("*.") {
-            (wildcard.trim_matches('.').to_string(), true)
-        } else {
-            let clean = trimmed.trim_matches('.').to_string();
-            // In standard adblockers, a domain rule like "doubleclick.net" also blocks subdomains
-            (clean, true)
-        }
-    }
-
-    /// Add a collection of rules
+    /// Add a collection of raw lines (auto-parses ABP, hosts, plain domains, and allowlists)
     pub fn add(&mut self, rules: &[String]) -> usize {
         let mut added_count = 0;
         for raw in rules {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-            let (normalized, is_suffix) = Self::normalize_rule(trimmed);
-            if normalized.is_empty() {
-                continue;
-            }
-
-            if !self.exact_rules.contains(&normalized) && !self.suffix_rules.contains(&normalized) {
-                if is_suffix {
-                    self.suffix_rules.insert(normalized.clone());
-                } else {
-                    self.exact_rules.insert(normalized.clone());
+            let parsed = parse_line(raw);
+            for rule in parsed {
+                match rule {
+                    ParsedRule::Block(domain) => {
+                        if self.block_rules.insert(domain.clone()) {
+                            self.ordered_rules.push(raw.clone());
+                            added_count += 1;
+                        }
+                    }
+                    ParsedRule::Allow(domain) => {
+                        if self.allowlist_rules.insert(domain) {
+                            added_count += 1;
+                        }
+                    }
                 }
-                self.ordered_rules.push(trimmed.to_string());
-                added_count += 1;
             }
         }
         added_count
+    }
+
+    /// Explicitly add allowlist rules
+    pub fn add_allowlist(&mut self, rules: &[String]) -> usize {
+        let mut count = 0;
+        for raw in rules {
+            let parsed = parse_line(raw);
+            if parsed.is_empty() {
+                if let Some(valid) = normalize_domain(raw) {
+                    if self.allowlist_rules.insert(valid) {
+                        count += 1;
+                    }
+                }
+            } else {
+                for p in parsed {
+                    match p {
+                        ParsedRule::Allow(d) | ParsedRule::Block(d) => {
+                            if self.allowlist_rules.insert(d) {
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        count
     }
 
     /// Remove a collection of rules
     pub fn remove(&mut self, rules: &[String]) -> usize {
         let mut removed_count = 0;
         for raw in rules {
-            let (normalized, _) = Self::normalize_rule(raw);
-            let removed_exact = self.exact_rules.remove(&normalized);
-            let removed_suffix = self.suffix_rules.remove(&normalized);
-            if removed_exact || removed_suffix {
-                self.ordered_rules.retain(|r| {
-                    let (n, _) = Self::normalize_rule(r);
-                    n != normalized
-                });
-                removed_count += 1;
+            let parsed = parse_line(raw);
+            for p in parsed {
+                let domain = match p {
+                    ParsedRule::Block(d) => d,
+                    ParsedRule::Allow(d) => d,
+                };
+                let removed_block = self.block_rules.remove(&domain);
+                let removed_allow = self.allowlist_rules.remove(&domain);
+                if removed_block || removed_allow {
+                    self.ordered_rules.retain(|r| !r.contains(&domain));
+                    removed_count += 1;
+                }
             }
         }
         removed_count
@@ -78,38 +206,51 @@ impl RuleStore {
 
     /// Clear all rules
     pub fn clear(&mut self) {
-        self.exact_rules.clear();
-        self.suffix_rules.clear();
+        self.block_rules.clear();
+        self.allowlist_rules.clear();
         self.ordered_rules.clear();
     }
 
-    /// Total active rules count
+    /// Total active block rules count
     pub fn count(&self) -> usize {
-        self.ordered_rules.len()
+        self.block_rules.len()
+    }
+
+    /// Total active allowlist rules count
+    pub fn allowlist_count(&self) -> usize {
+        self.allowlist_rules.len()
     }
 
     /// Check if a queried domain matches any rule.
-    /// Returns Some(matching_rule) or None.
+    /// Follows spec/blocklist-rules.md:
+    /// 1. Check Allowlist FIRST (exact or suffix match) -> returns None (allowed)
+    /// 2. Check Blocklist (exact or suffix match) -> returns Some(matching_rule) (blocked)
     pub fn check(&self, domain: &str) -> Option<String> {
-        let clean = domain.trim().trim_matches('.').to_ascii_lowercase();
-        if clean.is_empty() {
+        let clean = match normalize_domain(domain) {
+            Some(d) => d,
+            None => return None,
+        };
+
+        // 1. Allowlist Check FIRST (exact or dot-boundary suffix)
+        if self.allowlist_rules.contains(&clean) {
             return None;
         }
-
-        // 1. Direct exact or suffix match
-        if self.exact_rules.contains(&clean) {
-            return Some(clean);
-        }
-        if self.suffix_rules.contains(&clean) {
-            return Some(clean);
-        }
-
-        // 2. Iteratively peel off leftmost subdomain label:
-        // e.g. "ad.doubleclick.net" -> checks "doubleclick.net"
         let mut cursor = clean.as_str();
         while let Some(dot_idx) = cursor.find('.') {
             cursor = &cursor[dot_idx + 1..];
-            if self.suffix_rules.contains(cursor) {
+            if self.allowlist_rules.contains(cursor) {
+                return None;
+            }
+        }
+
+        // 2. Blocklist Check (exact or dot-boundary suffix)
+        if self.block_rules.contains(&clean) {
+            return Some(clean);
+        }
+        let mut cursor = clean.as_str();
+        while let Some(dot_idx) = cursor.find('.') {
+            cursor = &cursor[dot_idx + 1..];
+            if self.block_rules.contains(cursor) {
                 return Some(cursor.to_string());
             }
         }
@@ -175,5 +316,34 @@ mod tests {
         assert!(store.check("github.com").is_none());
         assert!(store.check("cloudflare.com").is_none());
         assert!(store.check("ADSERVICE.GOOGLE.COM").is_some());
+    }
+
+    #[test]
+    fn test_abp_and_allowlist() {
+        let mut store = RuleStore::new();
+        store.add(&[
+            "||adservice.google.com^".into(),
+            "@@||safe.adservice.google.com^".into(),
+            "0.0.0.0 bad-host.com banner.bad-host.com".into(),
+            "127.0.0.1 malicious-tracker.net # inline comment".into(),
+            "plain-ad.com".into(),
+        ]);
+
+        // Blocked ABP
+        assert!(store.check("adservice.google.com").is_some());
+        assert!(store.check("sub.adservice.google.com").is_some());
+
+        // Allowlisted ABP
+        assert!(store.check("safe.adservice.google.com").is_none());
+        assert!(store.check("sub.safe.adservice.google.com").is_none());
+
+        // Hosts
+        assert!(store.check("bad-host.com").is_some());
+        assert!(store.check("banner.bad-host.com").is_some());
+        assert!(store.check("malicious-tracker.net").is_some());
+
+        // Plain domain
+        assert!(store.check("plain-ad.com").is_some());
+        assert!(store.check("sub.plain-ad.com").is_some());
     }
 }

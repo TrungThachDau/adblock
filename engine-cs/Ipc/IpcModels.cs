@@ -1,12 +1,25 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace AdblockEngine.Ipc;
 
-public record RpcRequest(
-    [property: JsonPropertyName("id")] object? Id,
-    [property: JsonPropertyName("method")] string Method,
-    [property: JsonPropertyName("params")] System.Text.Json.JsonElement? Params
-);
+public class RpcRequest
+{
+    [JsonPropertyName("id")]
+    public object? Id { get; set; }
+
+    [JsonPropertyName("method")]
+    public string? Method { get; set; }
+
+    [JsonPropertyName("cmd")]
+    public string? Cmd { get; set; }
+
+    [JsonIgnore]
+    public string EffectiveMethod => Method ?? Cmd ?? string.Empty;
+
+    [JsonPropertyName("params")]
+    public JsonElement? Params { get; set; }
+}
 
 public record RpcSuccessResponse(
     [property: JsonPropertyName("id")] object? Id,

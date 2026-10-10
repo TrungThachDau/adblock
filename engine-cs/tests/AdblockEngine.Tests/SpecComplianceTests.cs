@@ -52,6 +52,31 @@ public class SpecComplianceTests
     }
 
     [Fact]
+    public void TestSpecTestDataCases()
+    {
+        string listPath = FindSpecPath("testdata/sample_list.txt");
+        string casesPath = FindSpecPath("testdata/cases.json");
+
+        var store = new RuleStore();
+        int loaded = store.LoadFile(listPath);
+        Assert.True(loaded > 0, "Expected to load rules from sample_list.txt");
+
+        string casesJson = File.ReadAllText(casesPath);
+        using var doc = JsonDocument.Parse(casesJson);
+
+        foreach (var item in doc.RootElement.EnumerateArray())
+        {
+            string host = item.GetProperty("host").GetString()!;
+            bool expectedBlocked = item.GetProperty("expected_blocked").GetBoolean();
+            string desc = item.TryGetProperty("description", out var descProp) ? descProp.GetString()! : host;
+
+            bool isBlocked = store.Check(host) != null;
+            Assert.True(isBlocked == expectedBlocked,
+                $"Failed testdata case '{host}' ({desc}) - expected {expectedBlocked}, actual {isBlocked}");
+        }
+    }
+
+    [Fact]
     public void TestSpecPacketHexVectors()
     {
         string packetsPath = FindSpecPath("test-data/packets.json");

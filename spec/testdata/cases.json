@@ -1,0 +1,157 @@
+[
+  {
+    "host": "adservice.google.com",
+    "expected_blocked": true,
+    "description": "Exact match for ABP block rule ||adservice.google.com^"
+  },
+  {
+    "host": "sub.adservice.google.com",
+    "expected_blocked": true,
+    "description": "Subdomain match for ABP block rule ||adservice.google.com^"
+  },
+  {
+    "host": "deep.nested.sub.adservice.google.com",
+    "expected_blocked": true,
+    "description": "Deep multi-level subdomain match for ABP block rule"
+  },
+  {
+    "host": "safe.adservice.google.com",
+    "expected_blocked": false,
+    "description": "Allowlist rule @@||safe.adservice.google.com^ overrides blocklist"
+  },
+  {
+    "host": "sub.safe.adservice.google.com",
+    "expected_blocked": false,
+    "description": "Subdomain of allowlist rule is also allowed"
+  },
+  {
+    "host": "notadservice.google.com",
+    "expected_blocked": false,
+    "description": "Prefix overlap without dot boundary must not match"
+  },
+  {
+    "host": "google.com",
+    "expected_blocked": false,
+    "description": "Parent domain of blocked subdomain must remain unblocked"
+  },
+  {
+    "host": "adservice.google.com.evil.com",
+    "expected_blocked": false,
+    "description": "Domain where blocked rule appears as prefix of another domain must not match"
+  },
+  {
+    "host": "analytics.tracker.net",
+    "expected_blocked": true,
+    "description": "Exact match for ABP block rule ||analytics.tracker.net^"
+  },
+  {
+    "host": "cdn.analytics.tracker.net",
+    "expected_blocked": false,
+    "description": "Allowlist @@||cdn.analytics.tracker.net^ overrides blocklist"
+  },
+  {
+    "host": "img.cdn.analytics.tracker.net",
+    "expected_blocked": false,
+    "description": "Subdomain of allowlisted cdn domain is allowed"
+  },
+  {
+    "host": "other.analytics.tracker.net",
+    "expected_blocked": true,
+    "description": "Non-allowlisted sibling subdomain remains blocked"
+  },
+  {
+    "host": "bad-host.com",
+    "expected_blocked": true,
+    "description": "Hosts 0.0.0.0 entry"
+  },
+  {
+    "host": "banner.bad-host.com",
+    "expected_blocked": true,
+    "description": "Hosts 0.0.0.0 secondary host on the same line"
+  },
+  {
+    "host": "sub.bad-host.com",
+    "expected_blocked": true,
+    "description": "Subdomain of hosts file entry is blocked"
+  },
+  {
+    "host": "malicious-tracker.net",
+    "expected_blocked": true,
+    "description": "Hosts 127.0.0.1 entry with stripped inline comment"
+  },
+  {
+    "host": "ipv6-adserver.com",
+    "expected_blocked": true,
+    "description": "Hosts ::1 entry"
+  },
+  {
+    "host": "plain-ad.com",
+    "expected_blocked": true,
+    "description": "Plain domain entry"
+  },
+  {
+    "host": "sub.plain-ad.com",
+    "expected_blocked": true,
+    "description": "Subdomain of plain domain entry"
+  },
+  {
+    "host": "popup-network.biz",
+    "expected_blocked": true,
+    "description": "Plain domain entry"
+  },
+  {
+    "host": "spyware-domain.xyz",
+    "expected_blocked": true,
+    "description": "Plain domain entry"
+  },
+  {
+    "host": "example-path.com",
+    "expected_blocked": false,
+    "description": "Path rules with / were skipped, domain must not be blocked"
+  },
+  {
+    "host": "click.com",
+    "expected_blocked": false,
+    "description": "Wildcard rules with * were skipped, domain must not be blocked"
+  },
+  {
+    "host": "example.com",
+    "expected_blocked": false,
+    "description": "Element hiding rules with ## were skipped, domain must not be blocked"
+  },
+  {
+    "host": "clean-site.org",
+    "expected_blocked": false,
+    "description": "Element hiding rules were skipped, domain must not be blocked"
+  },
+  {
+    "host": "track.com",
+    "expected_blocked": false,
+    "description": "Rules with $domain= options were skipped, domain must not be blocked"
+  },
+  {
+    "host": "script-block.com",
+    "expected_blocked": false,
+    "description": "Rules with $script options were skipped, domain must not be blocked"
+  },
+  {
+    "host": "localhost",
+    "expected_blocked": false,
+    "description": "Localhost entry is ignored"
+  },
+  {
+    "host": "wikipedia.org",
+    "expected_blocked": false,
+    "description": "Clean domain not present in any list"
+  },
+  {
+    "host": "ADSERVICE.GOOGLE.COM",
+    "expected_blocked": true,
+    "description": "Matching must be case-insensitive"
+  },
+  {
+    "host": "Safe.AdService.Google.Com",
+    "expected_blocked": false,
+    "description": "Allowlist matching must be case-insensitive"
+  }
+]
