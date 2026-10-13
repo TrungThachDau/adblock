@@ -15,8 +15,6 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseXamlCompilerExecutable>false</UseXamlCompilerExecutable>
-    <EnableDefaultPageItems>false</EnableDefaultPageItems>
-    <EnableDefaultApplicationDefinition>false</EnableDefaultApplicationDefinition>
   </PropertyGroup>
 
   <ItemGroup>
@@ -24,4 +22,26 @@
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.1742" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.3.2" />
   </ItemGroup>
+
+  <PropertyGroup>
+    <RustEngineManifest>$(MSBuildProjectDirectory)\..\engine-rs\Cargo.toml</RustEngineManifest>
+    <RustEngineTargetDir>$(MSBuildProjectDirectory)\..\engine-rs\target\standalone</RustEngineTargetDir>
+    <RustEngineReleaseDir>$(RustEngineTargetDir)\release</RustEngineReleaseDir>
+  </PropertyGroup>
+
+  <Target Name="BuildRustEngine" BeforeTargets="PrepareForBuild">
+    <Exec Command="cargo build --release --manifest-path &quot;$(RustEngineManifest)&quot; --target-dir &quot;$(RustEngineTargetDir)&quot;" />
+  </Target>
+
+  <Target Name="CopyRustEngine" AfterTargets="Build">
+    <MakeDir Directories="$(OutDir)spec\test-data" />
+    <Copy
+      SourceFiles="$(RustEngineReleaseDir)\adblock-engine-rs.exe;$(RustEngineReleaseDir)\WinDivert.dll;$(RustEngineReleaseDir)\WinDivert64.sys"
+      DestinationFolder="$(OutDir)"
+      SkipUnchangedFiles="true" />
+    <Copy
+      SourceFiles="$(MSBuildProjectDirectory)\..\spec\test-data\rules.txt"
+      DestinationFolder="$(OutDir)spec\test-data"
+      SkipUnchangedFiles="true" />
+  </Target>
 </Project>

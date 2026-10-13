@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Pipes;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -84,8 +85,9 @@ public class EngineClient : IDisposable
 
     private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> _pendingRequests = new();
     private long _requestIdSeq = 1;
-    private bool _isConnected;
+    private volatile bool _isConnected;
     private string _activePipeName = "";
+    private readonly SemaphoreSlim _writeLock = new(1, 1);
 
     public bool IsConnected => _isConnected;
     public string ActivePipeName => _activePipeName;
@@ -105,44 +107,46 @@ public class EngineClient : IDisposable
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            bool connected = false;
-
             foreach (var pipeName in CandidatePipes)
             {
                 if (cancellationToken.IsCancellationRequested) break;
 
+                NamedPipeClientStream? pipe = null;
+                bool wasConnected = false;
                 try
                 {
-                    var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+                    pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
                     await pipe.ConnectAsync(1500, cancellationToken);
 
                     _pipe = pipe;
                     _activePipeName = pipeName;
                     _writer = new StreamWriter(pipe, new UTF8Encoding(false)) { AutoFlush = true };
                     _isConnected = true;
-                    connected = true;
-                    ConnectionStateChanged?.Invoke(true);
+                    wasConnected = true;
+                    RaiseSafe(() => ConnectionStateChanged?.Invoke(true));
 
                     _readTask = ReadLoopAsync(pipe, cancellationToken);
                     await _readTask;
-                    break;
                 }
-                catch (TimeoutException) { }
-                catch (IOException) { }
-                catch (OperationCanceledException) { break; }
+                catch (OperationCanceledException) { }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[PipeClient] Connect failed on {pipeName}: {ex.Message}");
+                    System.Diagnostics.Debug.WriteLine($"[PipeClient] {pipeName}: {ex.Message}");
                 }
                 finally
                 {
-                    if (_isConnected && !connected)
-                    {
-                        _isConnected = false;
-                        ConnectionStateChanged?.Invoke(false);
-                    }
+                    _isConnected = false;
                     Cleanup();
+                    pipe?.Dispose();
+                    foreach (var key in _pendingRequests.Keys)
+                    {
+                        if (_pendingRequests.TryRemove(key, out var tcs))
+                            tcs.TrySetException(new IOException("Engine connection lost."));
+                    }
+                    if (wasConnected) RaiseSafe(() => ConnectionStateChanged?.Invoke(false));
                 }
+
+                if (wasConnected) break;
             }
 
             try
@@ -210,6 +214,14 @@ public class EngineClient : IDisposable
                             logData.TryGetProperty("reason", out var reas) ? reas.GetString() ?? "" : ""
                         );
                         QueryLogReceived?.Invoke(log);
+
+                        // Both engines push blocks as query_log with action "blocked".
+                        if (log.Action.Equals("blocked", StringComparison.OrdinalIgnoreCase) ||
+                            log.Action.Equals("dropped", StringComparison.OrdinalIgnoreCase))
+                        {
+                            BlockedQueryReceived?.Invoke(new BlockedQueryModel(
+                                log.Id, log.Timestamp, log.Protocol, log.ClientIp, log.Domain, log.Reason, ""));
+                        }
                     }
                     else if (eventType == "stats_update" && root.TryGetProperty("data", out var statsData))
                     {
@@ -291,10 +303,25 @@ public class EngineClient : IDisposable
         };
 
         string json = JsonSerializer.Serialize(payload);
-        await _writer.WriteLineAsync(json);
+        await _writeLock.WaitAsync();
+        try
+        {
+            var writer = _writer ?? throw new IOException("Engine connection lost.");
+            await writer.WriteLineAsync(json);
+        }
+        catch
+        {
+            _pendingRequests.TryRemove(reqId, out _);
+            throw;
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
 
         using var cts = new CancellationTokenSource(timeoutMs);
-        using (cts.Token.Register(() => {
+        using (cts.Token.Register(() =>
+        {
             if (_pendingRequests.TryRemove(reqId, out var removed))
             {
                 removed.TrySetException(new TimeoutException($"Request '{command}' timed out."));
@@ -389,7 +416,7 @@ public class EngineClient : IDisposable
 
     public async Task<List<BlockedQueryModel>> GetRecentBlockedAsync(int limit = 50)
     {
-        var res = await SendCommandAsync("get_recent_blocked", new { limit });
+        var res = await SendCommandAsync("get_recent_blocked", new { limit = 500 });
         var list = new List<BlockedQueryModel>();
         if (res.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
         {
@@ -406,7 +433,12 @@ public class EngineClient : IDisposable
                 ));
             }
         }
-        return list;
+        // Normalize ordering for the engine's recent-blocked response.
+        return list
+            .OrderByDescending(b => b.Timestamp)
+            .ThenByDescending(b => long.TryParse(b.Id, out var n) ? n : 0)
+            .Take(limit)
+            .ToList();
     }
 
     public async Task ReloadAsync()
@@ -417,6 +449,11 @@ public class EngineClient : IDisposable
     public async Task ResetStatsAsync()
     {
         await SendCommandAsync("stats.reset");
+    }
+
+    private static void RaiseSafe(Action a)
+    {
+        try { a(); } catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[PipeClient] handler: {ex.Message}"); }
     }
 
     private void Cleanup()

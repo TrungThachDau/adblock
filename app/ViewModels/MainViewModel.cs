@@ -88,6 +88,8 @@ public partial class MainViewModel : ObservableObject
     private readonly ConcurrentQueue<QueryLogItemViewModel> _incomingLogs = new();
     private volatile EngineStatsModel? _latestStats;
     private readonly DispatcherQueueTimer _batchTimer;
+    private long _uptimeBaseSeconds;
+    private DateTimeOffset _uptimeCapturedAt;
 
     public ListManagerService ListManager => _listManager;
     public AllowlistService Allowlist => _allowlist;
@@ -159,6 +161,12 @@ public partial class MainViewModel : ObservableObject
 
     [ObservableProperty]
     private string _newAllowlistRule = "";
+
+    [ObservableProperty]
+    private string _newManualBlockDomain = "";
+
+    [ObservableProperty]
+    private string _manualBlockStatus = "";
 
     public ObservableCollection<BlocklistSubscription> Subscriptions { get; } = new();
     public ObservableCollection<string> AllowlistRules { get; } = new();
@@ -233,14 +241,19 @@ public partial class MainViewModel : ObservableObject
 
         if (connected)
         {
-            _ = Task.Run(async () =>
+            // Run on the UI thread so list/allowlist collections are never touched concurrently.
+            _dispatcher.TryEnqueue(async () =>
             {
                 try
                 {
                     await RefreshStatusAsync();
-                    await _listManager.SyncWithEngineAsync();
+                    await _listManager.SyncWithEngineAsync(skipIfEmpty: true);
                     await _allowlist.SyncWithEngineAsync();
                     await FetchRecentBlockedAsync();
+                    await RefreshStatusAsync();
+
+                    await _listManager.EnsureDownloadedAsync();
+                    await _listManager.SyncWithEngineAsync(skipIfEmpty: true);
                     await RefreshStatusAsync();
                 }
                 catch (Exception ex)
@@ -298,6 +311,15 @@ public partial class MainViewModel : ObservableObject
 
     private void OnBatchTimerTick(DispatcherQueueTimer sender, object args)
     {
+        if (IsConnected && _uptimeCapturedAt != default)
+        {
+            long uptime = _uptimeBaseSeconds + (long)(DateTimeOffset.UtcNow - _uptimeCapturedAt).TotalSeconds;
+            if (uptime != UptimeSeconds)
+            {
+                UpdateUptimeDisplay(uptime);
+            }
+        }
+
         // 1. Process latest engine stats
         var stats = _latestStats;
         if (stats != null)
@@ -345,14 +367,29 @@ public partial class MainViewModel : ObservableObject
         TlsQueries = stats.TlsQueries;
         TlsBlocked = stats.TlsBlocked;
         QuicDropped = stats.QuicDropped;
-        RamMb = stats.RamMb;
-        UptimeSeconds = stats.UptimeSeconds;
-
-        var ts = TimeSpan.FromSeconds(stats.UptimeSeconds);
-        UptimeFormatted = ts.TotalHours >= 1 ? $"{(int)ts.TotalHours}h {ts.Minutes}m {ts.Seconds}s" : $"{ts.Minutes}m {ts.Seconds}s";
+        if (stats.RamBytes > 0 || stats.RamMb > 0)
+        {
+            RamMb = stats.RamMb;
+        }
 
         long total = stats.AllowedCount + stats.BlockedCount;
         BlockRatePercent = total > 0 ? Math.Round((double)stats.BlockedCount / total * 100.0, 1) : 0.0;
+    }
+
+    private void SetUptime(long seconds)
+    {
+        _uptimeBaseSeconds = Math.Max(0, seconds);
+        _uptimeCapturedAt = DateTimeOffset.UtcNow;
+        UpdateUptimeDisplay(_uptimeBaseSeconds);
+    }
+
+    private void UpdateUptimeDisplay(long seconds)
+    {
+        UptimeSeconds = seconds;
+        var ts = TimeSpan.FromSeconds(seconds);
+        UptimeFormatted = ts.TotalHours >= 1
+            ? $"{(int)ts.TotalHours}h {ts.Minutes}m {ts.Seconds}s"
+            : $"{ts.Minutes}m {ts.Seconds}s";
     }
 
     public async Task RefreshStatusAsync()
@@ -362,7 +399,16 @@ public partial class MainViewModel : ObservableObject
         try
         {
             var status = await _client.GetStatusAsync();
-            var stats = status.Stats ?? await _client.GetStatsAsync();
+            EngineStatsModel? stats = status.Stats;
+            try
+            {
+                // get_status.stats contains counters only in both engines; get_stats also supplies RAM.
+                stats = await _client.GetStatsAsync();
+            }
+            catch
+            {
+                // Keep the counters from get_status if the optional metrics request fails.
+            }
 
             _dispatcher.TryEnqueue(() =>
             {
@@ -372,13 +418,13 @@ public partial class MainViewModel : ObservableObject
                 ActiveRulesCount = status.ActiveRulesCount;
                 AllowlistCount = status.AllowlistCount;
                 ListsCount = status.ListsCount;
-                UptimeSeconds = status.UptimeSeconds;
-
-                var ts = TimeSpan.FromSeconds(status.UptimeSeconds);
-                UptimeFormatted = ts.TotalHours >= 1 ? $"{(int)ts.TotalHours}h {ts.Minutes}m {ts.Seconds}s" : $"{ts.Minutes}m {ts.Seconds}s";
+                SetUptime(status.UptimeSeconds > 0 ? status.UptimeSeconds : stats?.UptimeSeconds ?? 0);
                 StatusText = $"Connected: {status.Name} v{status.Version} ({status.State})";
 
-                UpdateStatsProperties(stats);
+                if (stats != null)
+                {
+                    UpdateStatsProperties(stats);
+                }
             });
         }
         catch { }
@@ -427,7 +473,7 @@ public partial class MainViewModel : ObservableObject
                 string state = await _client.StartEngineAsync();
                 IsRunning = state.Equals("running", StringComparison.OrdinalIgnoreCase);
             }
-            StatusText = $"Connected: {EngineName} ({ (IsRunning ? "running" : "stopped") })";
+            StatusText = $"Connected: {EngineName} ({(IsRunning ? "running" : "stopped")})";
         }
         catch { }
     }
@@ -487,6 +533,32 @@ public partial class MainViewModel : ObservableObject
     public async Task DeleteSubscriptionAsync(string id)
     {
         await _listManager.DeleteListAsync(id);
+        await RefreshStatusAsync();
+    }
+
+    [RelayCommand]
+    public async Task AddManualBlockDomainAsync()
+    {
+        string domain = NewManualBlockDomain.Trim();
+        if (string.IsNullOrEmpty(domain)) return;
+
+        bool added = await _listManager.AddManualBlockRuleAsync(domain);
+        if (added)
+        {
+            NewManualBlockDomain = "";
+            ManualBlockStatus = $"Blocked {domain.Trim().Trim('.').ToLowerInvariant()}.";
+        }
+        else
+        {
+            ManualBlockStatus = "Enter a valid domain that has not already been added.";
+        }
+        await RefreshStatusAsync();
+    }
+
+    [RelayCommand]
+    public async Task RemoveManualBlockDomainAsync(string domain)
+    {
+        await _listManager.RemoveManualBlockRuleAsync(domain);
         await RefreshStatusAsync();
     }
 

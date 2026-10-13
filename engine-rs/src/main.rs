@@ -6,7 +6,7 @@ use adblock_engine_rs::ipc::{run_ipc_server, EngineState, EventBroadcaster};
 use adblock_engine_rs::rules::RuleStore;
 use std::env;
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -170,6 +170,34 @@ fn stop_service() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn find_rules_file(args: &[String]) -> Option<PathBuf> {
+    if let Some(index) = args.iter().position(|arg| arg == "--rules") {
+        return args.get(index + 1).map(PathBuf::from);
+    }
+
+    let mut roots = Vec::new();
+    if let Ok(exe) = env::current_exe() {
+        roots.extend(exe.ancestors().map(Path::to_path_buf));
+    }
+    if let Ok(current_dir) = env::current_dir() {
+        roots.extend(current_dir.ancestors().map(Path::to_path_buf));
+    }
+
+    for root in roots {
+        for relative in ["spec/test-data/rules.txt", "spec/testdata/sample_list.txt"] {
+            let candidate = root.join(relative);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .map(|path| path.join("Adblock/rules.txt"))
+        .filter(|path| path.is_file())
+}
+
 fn run_console_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
@@ -188,29 +216,13 @@ fn run_console_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let rule_store = Arc::new(parking_lot::RwLock::new(RuleStore::new()));
         let broadcaster = EventBroadcaster::new(1024);
 
-        // Parse optional --rules argument
-        let mut rules_path = String::from("../spec/test-data/rules.txt");
-        let mut i = 1;
-        while i < args.len() {
-            if args[i] == "--rules" && i + 1 < args.len() {
-                rules_path = args[i + 1].clone();
-                i += 1;
+        if let Some(rules_path) = find_rules_file(args) {
+            match rule_store.write().load_file(&rules_path) {
+                Ok(loaded) => info!("Loaded {} rules from {}", loaded, rules_path.display()),
+                Err(error) => error!("Failed to load rules from {}: {}", rules_path.display(), error),
             }
-            i += 1;
-        }
-
-        if Path::new(&rules_path).exists() {
-            if let Ok(loaded) = rule_store.write().load_file(Path::new(&rules_path)) {
-                info!("Loaded {} rules from {}", loaded, rules_path);
-            }
-        } else if Path::new("spec/testdata/sample_list.txt").exists() {
-            if let Ok(loaded) = rule_store.write().load_file(Path::new("spec/testdata/sample_list.txt")) {
-                info!("Loaded {} rules from spec/testdata/sample_list.txt", loaded);
-            }
-        } else if Path::new("spec/test-data/rules.txt").exists() {
-            if let Ok(loaded) = rule_store.write().load_file(Path::new("spec/test-data/rules.txt")) {
-                info!("Loaded {} rules from spec/test-data/rules.txt", loaded);
-            }
+        } else {
+            error!("No rules file found; place rules.txt in ProgramData\\Adblock or alongside spec\\test-data.");
         }
 
         // Spawn WinDivert packet filtering worker thread (fail-open)

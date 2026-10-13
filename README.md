@@ -21,28 +21,23 @@ High-performance Windows domain-level ad and tracker blocker using **WinDivert 2
 │   ├── src/
 │   └── tests/
 │
-├── engine-cs/          # C# .NET 10 filtering engine (independent daemon/service)
-│   ├── AdblockEngine.csproj
-│   ├── Program.cs
-│   └── tests/
-│
 └── app/                # WinUI 3 unpackaged GUI application
     ├── AdblockApp.csproj
     ├── MainWindow.xaml
     └── Services/EngineClient.cs
 ```
 
-### Core Invariant & Interchangeability Rule
-- Both `engine-rs` and `engine-cs` implement the **exact same IPC specification** over the Windows Named Pipe `\\.\pipe\adblock-engine`.
-- The UI (`/app`) communicates exclusively over this pipe.
-- The UI does not know, check, or care which engine implementation is currently running. Both engines are 100% interchangeable drop-ins.
+### Core Runtime
+- `engine-rs` is the only active packet-filtering engine. The WinUI app builds, bundles, and starts it on launch.
+- The GUI communicates with `engine-rs` over the Windows Named Pipe `\\.\pipe\adblock.engine`.
+- `engine-cs` source remains in the repository as legacy code but is no longer included in the solution or startup flow.
 
 ---
 
 ## 2. Packet Filtering Specification (WinDivert 2.x)
 
 ### Filter String
-Both engines open WinDivert at `WINDIVERT_LAYER_NETWORK` (layer 0) with priority `0`:
+The Rust engine opens WinDivert at `WINDIVERT_LAYER_NETWORK` (layer 0) with priority `0`:
 ```sql
 outbound and !loopback and (udp.DstPort == 53 or (tcp.DstPort == 443 and tcp.PayloadLength > 0) or udp.DstPort == 443)
 ```
@@ -144,21 +139,12 @@ cargo test
 cargo run --release
 ```
 
-### 2. C# Engine (`/engine-cs`)
-```powershell
-cd d:\adblock\engine-cs
-
-# Run spec compliance unit tests
-dotnet test tests/AdblockEngine.Tests/AdblockEngine.Tests.csproj
-
-# Build and run engine (requires Administrator for packet divert)
-dotnet run -c Release
-```
-
-### 3. WinUI 3 Application (`/app`)
+### 2. WinUI 3 Application (`/app`)
 ```powershell
 cd d:\adblock\app
 
-# Build and run unpackaged WinUI 3 UI
-dotnet run -c Release
+# Build app and bundled Rust engine
+dotnet build -c Release -p:Platform=x64
 ```
+
+Run `AdblockApp.exe`; the GUI requests Administrator permission and starts the bundled Rust engine automatically.

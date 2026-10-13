@@ -150,12 +150,51 @@ impl EventBroadcaster {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct RawRpcRequest {
+    id: Value,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    cmd: Option<String>,
+    #[serde(default)]
+    params: Value,
+}
+
+#[derive(Debug, Clone)]
 pub struct RpcRequest {
     pub id: Value,
-    #[serde(alias = "cmd")]
     pub method: String,
-    #[serde(default)]
     pub params: Value,
+}
+
+impl RpcRequest {
+    // The GUI sends both `cmd` and `method`; a serde alias would reject that as a duplicate field.
+    pub fn parse(line: &str) -> Option<Self> {
+        let raw: RawRpcRequest = serde_json::from_str(line).ok()?;
+        Some(Self {
+            id: raw.id,
+            method: raw.method.or(raw.cmd)?,
+            params: raw.params,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RpcRequest;
+
+    #[test]
+    fn parses_request_with_both_cmd_and_method() {
+        let req = RpcRequest::parse(r#"{"id":"1","cmd":"get_status","method":"get_status","params":{}}"#)
+            .expect("request with both keys must parse");
+        assert_eq!(req.method, "get_status");
+    }
+
+    #[test]
+    fn parses_request_with_only_cmd() {
+        let req = RpcRequest::parse(r#"{"id":1,"cmd":"engine.ping"}"#).unwrap();
+        assert_eq!(req.method, "engine.ping");
+    }
 }
 
 pub fn get_process_ram() -> (u64, f64) {
@@ -203,7 +242,7 @@ async fn listen_pipe(
     server_options.first_pipe_instance(false);
 
     loop {
-        match server_options.create(pipe_name) {
+        match create_pipe_server(&server_options, pipe_name) {
             Ok(server) => {
                 let state_clone = Arc::clone(&state);
                 let rules_clone = Arc::clone(&rules);
@@ -226,6 +265,47 @@ async fn listen_pipe(
             }
         }
     }
+}
+
+fn create_pipe_server(
+    options: &ServerOptions,
+    pipe_name: &str,
+) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    use std::ffi::c_void;
+    use std::ptr;
+    use windows_sys::Win32::Security::{
+        Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        SECURITY_ATTRIBUTES,
+    };
+
+    let sddl: Vec<u16> = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut security_descriptor: *mut c_void = ptr::null_mut();
+    let converted = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            1,
+            &mut security_descriptor,
+            ptr::null_mut(),
+        )
+    };
+    if converted == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let mut attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: security_descriptor,
+        bInheritHandle: 0,
+    };
+    let attributes_ptr = (&mut attributes as *mut SECURITY_ATTRIBUTES).cast::<c_void>();
+    let result = unsafe { options.create_with_security_attributes_raw(pipe_name, attributes_ptr) };
+    unsafe {
+        windows_sys::Win32::Foundation::LocalFree(security_descriptor);
+    }
+    result
 }
 
 async fn handle_client(
@@ -269,9 +349,9 @@ async fn handle_request_line(
     rules: &SharedRuleStore,
     broadcaster: &EventBroadcaster,
 ) -> String {
-    let req: RpcRequest = match serde_json::from_str(line) {
-        Ok(r) => r,
-        Err(_) => {
+    let req: RpcRequest = match RpcRequest::parse(line) {
+        Some(r) => r,
+        None => {
             return json!({
                 "id": null,
                 "error": { "code": -32700, "message": "Parse error" }

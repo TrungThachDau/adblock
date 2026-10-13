@@ -1,6 +1,7 @@
 use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::fs::File;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::Arc;
@@ -118,14 +119,101 @@ pub fn parse_line(line: &str) -> Vec<ParsedRule> {
     Vec::new()
 }
 
+/// Keys are already FNV-1a hashes, so the set must not hash them again.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct IdentityHasher(u64);
+
+impl Hasher for IdentityHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0 << 8) | u64::from(b);
+        }
+    }
+
+    fn write_u64(&mut self, i: u64) {
+        self.0 = i;
+    }
+}
+
+type HashSet64 = HashSet<u64, BuildHasherDefault<IdentityHasher>>;
+
+/// FNV-1a 64-bit; must match engine-cs so both engines agree on rule identity.
+fn hash_domain(domain: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in domain.bytes() {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// Normalized domains are ASCII, so one byte per char in a single buffer avoids a heap allocation per rule.
+#[derive(Debug, Clone, Default)]
+struct DomainList {
+    buf: Vec<u8>,
+    ends: Vec<u32>,
+}
+
+impl DomainList {
+    fn len(&self) -> usize {
+        self.ends.len()
+    }
+
+    fn push(&mut self, domain: &str) {
+        self.buf.extend_from_slice(domain.as_bytes());
+        self.ends.push(self.buf.len() as u32);
+    }
+
+    fn remove(&mut self, domain: &str) -> bool {
+        let mut start = 0usize;
+        for i in 0..self.ends.len() {
+            let end = self.ends[i] as usize;
+            if end - start == domain.len() && &self.buf[start..end] == domain.as_bytes() {
+                self.buf.drain(start..end);
+                let removed = domain.len() as u32;
+                for e in &mut self.ends[i + 1..] {
+                    *e -= removed;
+                }
+                self.ends.remove(i);
+                return true;
+            }
+            start = end;
+        }
+        false
+    }
+
+    fn range(&self, offset: usize, end: usize) -> Vec<String> {
+        (offset..end)
+            .map(|i| {
+                let start = if i == 0 { 0 } else { self.ends[i - 1] as usize };
+                String::from_utf8_lossy(&self.buf[start..self.ends[i] as usize]).into_owned()
+            })
+            .collect()
+    }
+
+    fn shrink_to_fit(&mut self) {
+        self.buf.shrink_to_fit();
+        self.ends.shrink_to_fit();
+    }
+
+    fn clear(&mut self) {
+        self.buf = Vec::new();
+        self.ends = Vec::new();
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RuleStore {
     // Suffix rules for blocking (e.g. "doubleclick.net" matches "doubleclick.net" and "*.doubleclick.net")
-    block_rules: HashSet<String>,
+    block_rules: HashSet64,
     // Suffix rules for allowlisting (priority over block_rules)
-    allowlist_rules: HashSet<String>,
-    // Ordered raw rules list for deterministic pagination in UI
-    ordered_rules: Vec<String>,
+    allowlist_rules: HashSet64,
+    // Ordered normalized block domains for deterministic pagination in UI
+    ordered_rules: DomainList,
 }
 
 impl RuleStore {
@@ -141,13 +229,13 @@ impl RuleStore {
             for rule in parsed {
                 match rule {
                     ParsedRule::Block(domain) => {
-                        if self.block_rules.insert(domain.clone()) {
-                            self.ordered_rules.push(raw.clone());
+                        if self.block_rules.insert(hash_domain(&domain)) {
+                            self.ordered_rules.push(&domain);
                             added_count += 1;
                         }
                     }
                     ParsedRule::Allow(domain) => {
-                        if self.allowlist_rules.insert(domain) {
+                        if self.allowlist_rules.insert(hash_domain(&domain)) {
                             added_count += 1;
                         }
                     }
@@ -164,7 +252,7 @@ impl RuleStore {
             let parsed = parse_line(raw);
             if parsed.is_empty() {
                 if let Some(valid) = normalize_domain(raw) {
-                    if self.allowlist_rules.insert(valid) {
+                    if self.allowlist_rules.insert(hash_domain(&valid)) {
                         count += 1;
                     }
                 }
@@ -172,7 +260,7 @@ impl RuleStore {
                 for p in parsed {
                     match p {
                         ParsedRule::Allow(d) | ParsedRule::Block(d) => {
-                            if self.allowlist_rules.insert(d) {
+                            if self.allowlist_rules.insert(hash_domain(&d)) {
                                 count += 1;
                             }
                         }
@@ -193,10 +281,13 @@ impl RuleStore {
                     ParsedRule::Block(d) => d,
                     ParsedRule::Allow(d) => d,
                 };
-                let removed_block = self.block_rules.remove(&domain);
-                let removed_allow = self.allowlist_rules.remove(&domain);
+                let hash = hash_domain(&domain);
+                let removed_block = self.block_rules.remove(&hash);
+                let removed_allow = self.allowlist_rules.remove(&hash);
+                if removed_block {
+                    self.ordered_rules.remove(&domain);
+                }
                 if removed_block || removed_allow {
-                    self.ordered_rules.retain(|r| !r.contains(&domain));
                     removed_count += 1;
                 }
             }
@@ -206,8 +297,8 @@ impl RuleStore {
 
     /// Clear all rules
     pub fn clear(&mut self) {
-        self.block_rules.clear();
-        self.allowlist_rules.clear();
+        self.block_rules = HashSet64::default();
+        self.allowlist_rules = HashSet64::default();
         self.ordered_rules.clear();
     }
 
@@ -232,25 +323,25 @@ impl RuleStore {
         };
 
         // 1. Allowlist Check FIRST (exact or dot-boundary suffix)
-        if self.allowlist_rules.contains(&clean) {
+        if self.allowlist_rules.contains(&hash_domain(&clean)) {
             return None;
         }
         let mut cursor = clean.as_str();
         while let Some(dot_idx) = cursor.find('.') {
             cursor = &cursor[dot_idx + 1..];
-            if self.allowlist_rules.contains(cursor) {
+            if self.allowlist_rules.contains(&hash_domain(cursor)) {
                 return None;
             }
         }
 
         // 2. Blocklist Check (exact or dot-boundary suffix)
-        if self.block_rules.contains(&clean) {
+        if self.block_rules.contains(&hash_domain(&clean)) {
             return Some(clean);
         }
         let mut cursor = clean.as_str();
         while let Some(dot_idx) = cursor.find('.') {
             cursor = &cursor[dot_idx + 1..];
-            if self.block_rules.contains(cursor) {
+            if self.block_rules.contains(&hash_domain(cursor)) {
                 return Some(cursor.to_string());
             }
         }
@@ -265,18 +356,28 @@ impl RuleStore {
             return (total, Vec::new());
         }
         let end = (offset + limit).min(total);
-        (total, self.ordered_rules[offset..end].to_vec())
+        (total, self.ordered_rules.range(offset, end))
     }
 
     /// Load rules from a line-delimited text file
     pub fn load_file(&mut self, path: &Path) -> std::io::Result<usize> {
-        let file = File::open(path)?;
-        let reader = BufReader::new(file);
-        let mut lines = Vec::new();
+        const CHUNK: usize = 8192;
+        let reader = BufReader::new(File::open(path)?);
+        let mut chunk: Vec<String> = Vec::with_capacity(CHUNK);
+        let mut added = 0;
         for line in reader.lines() {
-            lines.push(line?);
+            chunk.push(line?);
+            if chunk.len() == CHUNK {
+                added += self.add(&chunk);
+                chunk.clear();
+            }
         }
-        Ok(self.add(&lines))
+        added += self.add(&chunk);
+
+        self.block_rules.shrink_to_fit();
+        self.allowlist_rules.shrink_to_fit();
+        self.ordered_rules.shrink_to_fit();
+        Ok(added)
     }
 }
 
@@ -345,5 +446,35 @@ mod tests {
         // Plain domain
         assert!(store.check("plain-ad.com").is_some());
         assert!(store.check("sub.plain-ad.com").is_some());
+    }
+
+    #[test]
+    fn test_list_and_remove_keep_order_and_offsets() {
+        let mut store = RuleStore::new();
+        store.add(&[
+            "a.com".into(),
+            "0.0.0.0 bb.net".into(),
+            "||ccc.org^".into(),
+            "dddd.io".into(),
+        ]);
+
+        assert_eq!(
+            store.list(0, 10),
+            (4, vec!["a.com".to_string(), "bb.net".into(), "ccc.org".into(), "dddd.io".into()])
+        );
+        assert_eq!(store.list(1, 2).1, vec!["bb.net".to_string(), "ccc.org".into()]);
+        assert!(store.list(9, 2).1.is_empty());
+
+        assert_eq!(store.remove(&["bb.net".into()]), 1);
+        assert_eq!(store.count(), 3);
+        assert_eq!(store.list(0, 10).1, vec!["a.com".to_string(), "ccc.org".into(), "dddd.io".into()]);
+        assert!(store.check("bb.net").is_none());
+        assert!(store.check("x.dddd.io").is_some());
+
+        // Removing a domain must not remove rules that merely contain it as a substring.
+        store.add(&["xa.com".into()]);
+        assert_eq!(store.remove(&["a.com".into()]), 1);
+        assert!(store.check("xa.com").is_some());
+        assert_eq!(store.list(0, 10).1, vec!["ccc.org".to_string(), "dddd.io".into(), "xa.com".into()]);
     }
 }

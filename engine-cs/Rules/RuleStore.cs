@@ -16,10 +16,103 @@ public readonly record struct ParsedRule(ParsedRuleType Type, string Domain);
 
 public class RuleStore
 {
-    private readonly HashSet<string> _blockRules = new(StringComparer.OrdinalIgnoreCase);
-    private readonly HashSet<string> _allowlistRules = new(StringComparer.OrdinalIgnoreCase);
-    private readonly List<string> _orderedRules = new();
+    private readonly HashSet<ulong> _blockRules = new();
+    private readonly HashSet<ulong> _allowlistRules = new();
+    private readonly DomainList _orderedRules = new();
     private readonly ReaderWriterLockSlim _lock = new();
+
+    // Domains are validated ASCII, so one byte per char in a single buffer avoids ~100 bytes of string overhead per rule.
+    private sealed class DomainList
+    {
+        private byte[] _buf = new byte[1024];
+        private int[] _ends = new int[256];
+        private int _count;
+
+        public int Count => _count;
+
+        public void Add(string domain)
+        {
+            int start = _count == 0 ? 0 : _ends[_count - 1];
+            if (start + domain.Length > _buf.Length)
+                Array.Resize(ref _buf, Math.Max(_buf.Length * 2, start + domain.Length));
+            if (_count == _ends.Length)
+                Array.Resize(ref _ends, _ends.Length * 2);
+
+            for (int i = 0; i < domain.Length; i++)
+                _buf[start + i] = (byte)domain[i];
+            _ends[_count++] = start + domain.Length;
+        }
+
+        public bool Remove(string domain)
+        {
+            int length = domain.Length;
+            int start = 0;
+            for (int i = 0; i < _count; i++)
+            {
+                int end = _ends[i];
+                if (end - start == length && Matches(start, domain))
+                {
+                    int total = _ends[_count - 1];
+                    Buffer.BlockCopy(_buf, end, _buf, start, total - end);
+                    for (int j = i; j < _count - 1; j++)
+                        _ends[j] = _ends[j + 1] - length;
+                    _count--;
+                    return true;
+                }
+                start = end;
+            }
+            return false;
+        }
+
+        private bool Matches(int start, string domain)
+        {
+            for (int i = 0; i < domain.Length; i++)
+            {
+                if (_buf[start + i] != (byte)domain[i])
+                    return false;
+            }
+            return true;
+        }
+
+        public List<string> GetRange(int offset, int count)
+        {
+            var result = new List<string>(count);
+            for (int i = offset; i < offset + count; i++)
+            {
+                int start = i == 0 ? 0 : _ends[i - 1];
+                result.Add(System.Text.Encoding.ASCII.GetString(_buf, start, _ends[i] - start));
+            }
+            return result;
+        }
+
+        public void TrimExcess()
+        {
+            Array.Resize(ref _buf, Math.Max(1024, _count == 0 ? 0 : _ends[_count - 1]));
+            Array.Resize(ref _ends, Math.Max(256, _count));
+        }
+
+        public void Clear()
+        {
+            _buf = new byte[1024];
+            _ends = new int[256];
+            _count = 0;
+        }
+    }
+
+    private static ulong HashDomain(string domain)
+    {
+        const ulong offsetBasis = 14695981039346656037;
+        const ulong prime = 1099511628211;
+
+        ulong hash = offsetBasis;
+        foreach (char c in domain)
+        {
+            hash ^= (byte)c;
+            hash *= prime;
+        }
+
+        return hash;
+    }
 
     public static string? NormalizeDomain(string raw)
     {
@@ -145,15 +238,15 @@ public class RuleStore
                 {
                     if (rule.Type == ParsedRuleType.Block)
                     {
-                        if (_blockRules.Add(rule.Domain))
+                        if (_blockRules.Add(HashDomain(rule.Domain)))
                         {
-                            _orderedRules.Add(raw);
+                            _orderedRules.Add(rule.Domain);
                             addedCount++;
                         }
                     }
                     else if (rule.Type == ParsedRuleType.Allow)
                     {
-                        if (_allowlistRules.Add(rule.Domain))
+                        if (_allowlistRules.Add(HashDomain(rule.Domain)))
                         {
                             addedCount++;
                         }
@@ -180,14 +273,14 @@ public class RuleStore
                 if (parsed.Count == 0)
                 {
                     var valid = NormalizeDomain(raw);
-                    if (valid != null && _allowlistRules.Add(valid))
+                    if (valid != null && _allowlistRules.Add(HashDomain(valid)))
                         count++;
                 }
                 else
                 {
                     foreach (var p in parsed)
                     {
-                        if (_allowlistRules.Add(p.Domain))
+                        if (_allowlistRules.Add(HashDomain(p.Domain)))
                             count++;
                     }
                 }
@@ -211,11 +304,15 @@ public class RuleStore
                 var parsed = ParseLine(raw);
                 foreach (var p in parsed)
                 {
-                    bool removedBlock = _blockRules.Remove(p.Domain);
-                    bool removedAllow = _allowlistRules.Remove(p.Domain);
+                    ulong domainHash = HashDomain(p.Domain);
+                    bool removedBlock = _blockRules.Remove(domainHash);
+                    bool removedAllow = _allowlistRules.Remove(domainHash);
+                    if (removedBlock)
+                    {
+                        _orderedRules.Remove(p.Domain);
+                    }
                     if (removedBlock || removedAllow)
                     {
-                        _orderedRules.RemoveAll(r => r.Contains(p.Domain));
                         removedCount++;
                     }
                 }
@@ -273,28 +370,28 @@ public class RuleStore
         try
         {
             // 1. Allowlist check FIRST (exact or dot-boundary suffix)
-            if (_allowlistRules.Contains(clean))
+            if (_allowlistRules.Contains(HashDomain(clean)))
                 return null;
 
             int dotIndex = clean.IndexOf('.');
             while (dotIndex >= 0)
             {
                 var suffix = clean.Substring(dotIndex + 1);
-                if (_allowlistRules.Contains(suffix))
+                if (_allowlistRules.Contains(HashDomain(suffix)))
                     return null;
 
                 dotIndex = clean.IndexOf('.', dotIndex + 1);
             }
 
             // 2. Blocklist check (exact or dot-boundary suffix)
-            if (_blockRules.Contains(clean))
+            if (_blockRules.Contains(HashDomain(clean)))
                 return clean;
 
             dotIndex = clean.IndexOf('.');
             while (dotIndex >= 0)
             {
                 var suffix = clean.Substring(dotIndex + 1);
-                if (_blockRules.Contains(suffix))
+                if (_blockRules.Contains(HashDomain(suffix)))
                     return suffix;
 
                 dotIndex = clean.IndexOf('.', dotIndex + 1);
@@ -331,7 +428,38 @@ public class RuleStore
         if (!File.Exists(path))
             return 0;
 
-        var lines = File.ReadAllLines(path);
-        return Add(lines);
+        // Chunked so the write lock is released between batches and the file is never fully materialised.
+        const int chunkSize = 8192;
+        int added = 0;
+        var chunk = new List<string>(chunkSize);
+        foreach (var line in File.ReadLines(path))
+        {
+            chunk.Add(line);
+            if (chunk.Count == chunkSize)
+            {
+                added += Add(chunk);
+                chunk.Clear();
+            }
+        }
+        added += Add(chunk);
+
+        _lock.EnterWriteLock();
+        try
+        {
+            _blockRules.TrimExcess();
+            _allowlistRules.TrimExcess();
+            _orderedRules.TrimExcess();
+        }
+        finally
+        {
+            _lock.ExitWriteLock();
+        }
+
+        // Parsing a large list leaves lots of short-lived garbage in the working set.
+        if (added > 50_000)
+        {
+            GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+        }
+        return added;
     }
 }

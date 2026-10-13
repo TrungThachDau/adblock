@@ -17,9 +17,15 @@ use windivert_sys::ChecksumFlags;
 /// Narrow filter as specified: outbound and (udp.DstPort == 53 or tcp.DstPort == 443)
 pub const FILTER_STRING: &str = "outbound and (udp.DstPort == 53 or tcp.DstPort == 443)";
 
-/// Active TCP 443 flow tracker to ensure only the first data packet of a 443 flow is inspected
+/// Active TCP 443 flow tracker retaining SNI so new rules can terminate existing flows.
+struct AllowedFlow {
+    domain: Option<String>,
+    last_seen: Instant,
+    blocked: bool,
+}
+
 struct FlowTracker {
-    allowed_flows: HashMap<TcpFlowKey, Instant>,
+    allowed_flows: HashMap<TcpFlowKey, AllowedFlow>,
     last_cleanup: Instant,
 }
 
@@ -31,13 +37,31 @@ impl FlowTracker {
         }
     }
 
-    fn is_allowed(&mut self, key: &TcpFlowKey) -> bool {
-        self.allowed_flows.contains_key(key)
+    fn domain(&mut self, key: &TcpFlowKey) -> Option<Option<String>> {
+        self.allowed_flows.get_mut(key).map(|flow| {
+            flow.last_seen = Instant::now();
+            flow.domain.clone()
+        })
     }
 
-    fn mark_allowed(&mut self, key: TcpFlowKey) {
-        self.allowed_flows.insert(key, Instant::now());
+    fn mark_allowed(&mut self, key: TcpFlowKey, domain: Option<String>) {
+        self.allowed_flows.insert(key, AllowedFlow {
+            domain,
+            last_seen: Instant::now(),
+            blocked: false,
+        });
         self.maybe_prune();
+    }
+
+    fn mark_blocked(&mut self, key: &TcpFlowKey) -> bool {
+        let Some(flow) = self.allowed_flows.get_mut(key) else {
+            return false;
+        };
+        if flow.blocked {
+            return false;
+        }
+        flow.blocked = true;
+        true
     }
 
     fn remove(&mut self, key: &TcpFlowKey) {
@@ -47,7 +71,7 @@ impl FlowTracker {
     fn maybe_prune(&mut self) {
         if self.last_cleanup.elapsed() > Duration::from_secs(30) || self.allowed_flows.len() > 10000 {
             let now = Instant::now();
-            self.allowed_flows.retain(|_, last_seen| now.duration_since(*last_seen) < Duration::from_secs(120));
+            self.allowed_flows.retain(|_, flow| now.duration_since(flow.last_seen) < Duration::from_secs(120));
             self.last_cleanup = now;
         }
     }
@@ -227,9 +251,39 @@ pub fn run_packet_loop(
                 continue;
             }
 
-            // If flow has already been inspected on its first data packet and permitted:
-            // Bypass immediately without parsing TLS.
-            if flow_tracker.is_allowed(&flow_key) {
+            // Recheck established flows so rules added after connection setup take effect.
+            if let Some(existing_domain) = flow_tracker.domain(&flow_key) {
+                if let Some(domain) = existing_domain {
+                    let matched_rule = { rules.read().check(&domain) };
+                    if let Some(rule) = matched_rule {
+                        let first_block = flow_tracker.mark_blocked(&flow_key);
+                        if let Some(rst_bytes) = build_tcp_rst(raw, details.is_ipv6) {
+                            let mut resp_packet = unsafe { WinDivertPacket::<NetworkLayer>::new(rst_bytes) };
+                            resp_packet.address = packet.address.clone();
+                            resp_packet.address.set_outbound(false);
+                            let _ = resp_packet.recalculate_checksums(ChecksumFlags::new());
+                            let _ = divert.send(&resp_packet);
+                        }
+
+                        if first_block {
+                            state.stats.tls_blocked.fetch_add(1, Ordering::Relaxed);
+                            let log_id = state.next_log_id().to_string();
+                            let entry = QueryLogEntry {
+                                id: log_id,
+                                timestamp,
+                                protocol: "TLS".to_string(),
+                                client_ip: flow_key.src_ip.to_string(),
+                                domain,
+                                action: "blocked".to_string(),
+                                reason: format!("Rule match: {} (active connection terminated)", rule),
+                            };
+                            state.record_blocked(entry.clone());
+                            broadcaster.send_log(entry);
+                        }
+                        continue;
+                    }
+                }
+
                 let _ = divert.send(&packet);
                 continue;
             }
@@ -275,7 +329,7 @@ pub fn run_packet_loop(
             if !is_blocked {
                 // First data packet is allowed (clean domain or non-SNI TLS payload)
                 // Mark flow as allowed so subsequent packets in this stream bypass inspection!
-                flow_tracker.mark_allowed(flow_key);
+                flow_tracker.mark_allowed(flow_key, sni.clone());
                 let _ = divert.send(&packet);
 
                 if let Some(domain) = sni {

@@ -1,0 +1,165 @@
+<Page
+    x:Class="AdblockApp.Pages.DashboardPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:AdblockApp"
+    xmlns:vm="using:AdblockApp.ViewModels"
+    NavigationCacheMode="Required">
+
+    <Page.Resources>
+        <Style x:Key="MetricValueStyle" TargetType="TextBlock" BasedOn="{StaticResource TitleLargeTextBlockStyle}" />
+        <Style x:Key="MetricLabelStyle" TargetType="TextBlock" BasedOn="{StaticResource CaptionTextBlockStyle}">
+            <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
+        </Style>
+    </Page.Resources>
+
+    <Grid Padding="32,16,32,24" RowSpacing="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Grid ColumnSpacing="16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="Dashboard" Style="{StaticResource TitleTextBlockStyle}" VerticalAlignment="Center" />
+            <ToggleSwitch
+                x:Name="ProtectionToggle"
+                Grid.Column="1"
+                OnContent="Protection on"
+                OffContent="Protection off"
+                IsOn="{x:Bind ViewModel.IsRunning, Mode=OneWay}"
+                IsEnabled="{x:Bind ViewModel.IsConnected, Mode=OneWay}"
+                Toggled="ProtectionToggle_Toggled" />
+        </Grid>
+
+        <InfoBar
+            Grid.Row="1"
+            IsOpen="{x:Bind local:Fmt.Not(ViewModel.IsConnected), Mode=OneWay}"
+            IsClosable="False"
+            Severity="Warning"
+            Title="Engine not connected"
+            Message="Start engine-rs or engine-cs. Reconnecting automatically." />
+
+        <VariableSizedWrapGrid Grid.Row="2" Orientation="Horizontal" ItemWidth="250" ItemHeight="112">
+            <Border Style="{StaticResource CardStyle}" Margin="0,0,12,12">
+                <StackPanel Spacing="4">
+                    <TextBlock Text="Blocked" Style="{StaticResource MetricLabelStyle}" />
+                    <TextBlock Text="{x:Bind local:Fmt.Num(ViewModel.BlockedCount), Mode=OneWay}" Style="{StaticResource MetricValueStyle}" />
+                    <TextBlock Text="{x:Bind local:Fmt.Percent(ViewModel.BlockRatePercent), Mode=OneWay}" Style="{StaticResource MetricLabelStyle}" />
+                </StackPanel>
+            </Border>
+            <Border Style="{StaticResource CardStyle}" Margin="0,0,12,12">
+                <StackPanel Spacing="4">
+                    <TextBlock Text="Allowed" Style="{StaticResource MetricLabelStyle}" />
+                    <TextBlock Text="{x:Bind local:Fmt.Num(ViewModel.AllowedCount), Mode=OneWay}" Style="{StaticResource MetricValueStyle}" />
+                    <TextBlock Text="requests passed" Style="{StaticResource MetricLabelStyle}" />
+                </StackPanel>
+            </Border>
+            <Border Style="{StaticResource CardStyle}" Margin="0,0,12,12">
+                <StackPanel Spacing="4">
+                    <TextBlock Text="DNS blocked" Style="{StaticResource MetricLabelStyle}" />
+                    <TextBlock Text="{x:Bind local:Fmt.Num(ViewModel.DnsBlocked), Mode=OneWay}" Style="{StaticResource MetricValueStyle}" />
+                    <TextBlock Text="{x:Bind local:Fmt.QueryTotal(ViewModel.DnsQueries, 'queries'), Mode=OneWay}" Style="{StaticResource MetricLabelStyle}" />
+                </StackPanel>
+            </Border>
+            <Border Style="{StaticResource CardStyle}" Margin="0,0,12,12">
+                <StackPanel Spacing="4">
+                    <TextBlock Text="TLS blocked" Style="{StaticResource MetricLabelStyle}" />
+                    <TextBlock Text="{x:Bind local:Fmt.Num(ViewModel.TlsBlocked), Mode=OneWay}" Style="{StaticResource MetricValueStyle}" />
+                    <TextBlock Text="{x:Bind local:Fmt.QueryTotal(ViewModel.TlsQueries, 'handshakes'), Mode=OneWay}" Style="{StaticResource MetricLabelStyle}" />
+                </StackPanel>
+            </Border>
+            <Border Style="{StaticResource CardStyle}" Margin="0,0,12,12">
+                <StackPanel Spacing="4">
+                    <TextBlock Text="QUIC dropped" Style="{StaticResource MetricLabelStyle}" />
+                    <TextBlock Text="{x:Bind local:Fmt.Num(ViewModel.QuicDropped), Mode=OneWay}" Style="{StaticResource MetricValueStyle}" />
+                    <TextBlock Text="UDP 443 packets" Style="{StaticResource MetricLabelStyle}" />
+                </StackPanel>
+            </Border>
+        </VariableSizedWrapGrid>
+
+        <Border Grid.Row="3" Style="{StaticResource CardStyle}">
+            <Grid ColumnSpacing="24" RowSpacing="4">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <StackPanel>
+                    <TextBlock Text="Engine" Style="{StaticResource MetricLabelStyle}" />
+                    <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}">
+                        <Run Text="{x:Bind ViewModel.EngineName, Mode=OneWay}" />
+                        <Run Text="{x:Bind ViewModel.EngineVersion, Mode=OneWay}" />
+                    </TextBlock>
+                </StackPanel>
+                <StackPanel Grid.Column="1">
+                    <TextBlock Text="State / uptime" Style="{StaticResource MetricLabelStyle}" />
+                    <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}">
+                        <Run Text="{x:Bind local:Fmt.State(ViewModel.IsRunning), Mode=OneWay}" />
+                        <Run Text="·" />
+                        <Run Text="{x:Bind ViewModel.UptimeFormatted, Mode=OneWay}" />
+                    </TextBlock>
+                </StackPanel>
+                <StackPanel Grid.Column="2">
+                    <TextBlock Text="Rules / exceptions" Style="{StaticResource MetricLabelStyle}" />
+                    <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}">
+                        <Run Text="{x:Bind local:Fmt.Num(ViewModel.ActiveRulesCount), Mode=OneWay}" />
+                        <Run Text="/" />
+                        <Run Text="{x:Bind local:Fmt.Num(ViewModel.AllowlistCount), Mode=OneWay}" />
+                    </TextBlock>
+                </StackPanel>
+                <StackPanel Grid.Column="3">
+                    <TextBlock Text="Engine memory" Style="{StaticResource MetricLabelStyle}" />
+                    <TextBlock Text="{x:Bind local:Fmt.Mb(ViewModel.RamMb), Mode=OneWay}" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="4" RowSpacing="8">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <Grid>
+                <TextBlock Text="Recent blocked" Style="{StaticResource SubtitleTextBlockStyle}" VerticalAlignment="Center" />
+                <Button Content="Clear" HorizontalAlignment="Right" Command="{x:Bind ViewModel.ClearRecentBlockedCommand}" />
+            </Grid>
+            <Border Grid.Row="1" Style="{StaticResource CardStyle}" Padding="0">
+                <Grid>
+                    <ListView ItemsSource="{x:Bind ViewModel.RecentBlocked}" SelectionMode="None">
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="vm:BlockedQueryItemViewModel">
+                                <Grid ColumnSpacing="12" Padding="0,8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Text="{x:Bind Domain}" Style="{StaticResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis">
+                                            <Run Text="{x:Bind TimeFormatted}" /> · <Run Text="{x:Bind Protocol}" /> · <Run Text="{x:Bind MatchedRule}" /> · <Run Text="{x:Bind SourceList}" />
+                                        </TextBlock>
+                                    </StackPanel>
+                                    <Button Grid.Column="1" Content="Allow" Tag="{x:Bind Domain}" Click="Allow_Click" VerticalAlignment="Center" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                    <TextBlock
+                        Text="No blocked requests yet."
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Visibility="{x:Bind local:Fmt.VisWhenEmpty(ViewModel.RecentBlocked.Count), Mode=OneWay}" />
+                </Grid>
+            </Border>
+        </Grid>
+    </Grid>
+</Page>

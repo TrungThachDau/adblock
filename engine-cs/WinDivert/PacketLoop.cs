@@ -11,18 +11,42 @@ namespace AdblockEngine.WinDivert;
 
 internal sealed class FlowTracker
 {
-    private readonly Dictionary<TcpFlowKey, long> _allowedFlows = new(1024);
-    private long _lastCleanupTicks = Environment.TickCount64;
-
-    public bool IsAllowed(in TcpFlowKey key)
+    private sealed class AllowedFlow(string? domain, long lastSeen)
     {
-        return _allowedFlows.ContainsKey(key);
+        public string? Domain { get; } = domain;
+        public long LastSeen { get; set; } = lastSeen;
+        public bool IsBlocked { get; set; }
     }
 
-    public void MarkAllowed(in TcpFlowKey key)
+    private readonly Dictionary<TcpFlowKey, AllowedFlow> _allowedFlows = new(1024);
+    private long _lastCleanupTicks = Environment.TickCount64;
+
+    public bool TryGetDomain(in TcpFlowKey key, out string? domain)
     {
-        _allowedFlows[key] = Environment.TickCount64;
+        if (_allowedFlows.TryGetValue(key, out var flow))
+        {
+            flow.LastSeen = Environment.TickCount64;
+            domain = flow.Domain;
+            return true;
+        }
+
+        domain = null;
+        return false;
+    }
+
+    public void MarkAllowed(in TcpFlowKey key, string? domain)
+    {
+        _allowedFlows[key] = new AllowedFlow(domain, Environment.TickCount64);
         MaybePrune();
+    }
+
+    public bool MarkBlocked(in TcpFlowKey key)
+    {
+        if (!_allowedFlows.TryGetValue(key, out var flow) || flow.IsBlocked)
+            return false;
+
+        flow.IsBlocked = true;
+        return true;
     }
 
     public void Remove(in TcpFlowKey key)
@@ -38,7 +62,7 @@ internal sealed class FlowTracker
             var toRemove = new List<TcpFlowKey>();
             foreach (var kvp in _allowedFlows)
             {
-                if (now - kvp.Value > 120_000)
+                if (now - kvp.Value.LastSeen > 120_000)
                 {
                     toRemove.Add(kvp.Key);
                 }
@@ -252,9 +276,36 @@ public class PacketLoop
                                 continue;
                             }
 
-                            // If flow has already been inspected on its first data packet and permitted: bypass
-                            if (flowTracker.IsAllowed(flowKey))
+                            // Recheck established flows so rules added after connection setup take effect.
+                            if (flowTracker.TryGetDomain(flowKey, out var existingDomain))
                             {
+                                if (existingDomain != null && _rules.Check(existingDomain) is { } establishedMatch)
+                                {
+                                    bool firstBlock = flowTracker.MarkBlocked(flowKey);
+                                    if (TlsPacket.TryBuildTcpRst(rawSpan, details.IsIPv6, responseBuffer.AsSpan(0, responseBuffer.Length), out int establishedRstLen))
+                                    {
+                                        var respAddr = addr;
+                                        respAddr.SetOutbound(false);
+                                        WinDivertNative.WinDivertHelperCalcChecksums(pResp, (uint)establishedRstLen, ref respAddr, 0);
+                                        WinDivertNative.WinDivertSend(handle, pResp, (uint)establishedRstLen, out _, ref respAddr);
+                                    }
+
+                                    if (firstBlock)
+                                    {
+                                        _ipc.IncrementTls(blocked: true);
+                                        _ipc.BroadcastLog(new QueryLogData(
+                                            _ipc.NextLogId(),
+                                            timestamp,
+                                            "TLS",
+                                            flowKey.SrcIp.ToString(),
+                                            existingDomain,
+                                            "blocked",
+                                            $"Rule match: {establishedMatch} (active connection terminated)"
+                                        ));
+                                    }
+                                    continue;
+                                }
+
                                 WinDivertNative.WinDivertSend(handle, pPacket, recvLen, out _, ref addr);
                                 continue;
                             }
@@ -300,7 +351,7 @@ public class PacketLoop
                                 // First data packet is allowed (clean domain or non-SNI TLS payload)
                                 // Mark flow as allowed so subsequent packets in this stream bypass inspection!
                                 _ipc.IncrementTls(blocked: false);
-                                flowTracker.MarkAllowed(flowKey);
+                                flowTracker.MarkAllowed(flowKey, sni);
                                 WinDivertNative.WinDivertSend(handle, pPacket, recvLen, out _, ref addr);
 
                                 if (sni != null)

@@ -1,6 +1,6 @@
 param(
-    [ValidateSet("cs", "rs")]
-    [string]$Engine = "cs"
+    [ValidateSet("rs")]
+    [string]$Engine = "rs"
 )
 
 $ErrorActionPreference = "Continue"
@@ -20,6 +20,12 @@ if (-not $isAdmin) {
 }
 
 # 2. Kiem tra xem Engine da dang chay chua qua Named Pipe
+$legacyEngine = Get-Process -Name "adblock-engine-cs" -ErrorAction SilentlyContinue
+if ($legacyEngine) {
+    Write-Host "[Loi] C# engine legacy van dang chay. Hay dung no truoc khi khoi dong Rust." -ForegroundColor Red
+    exit 1
+}
+
 $pipeExists = $false
 try {
     $client = New-Object System.IO.Pipes.NamedPipeClientStream(".", "adblock.engine", [System.IO.Pipes.PipeDirection]::InOut)
@@ -36,24 +42,17 @@ try {
 }
 
 if ($pipeExists) {
-    Write-Host "[Engine] Phat hien Engine da dang chay san tren Named Pipe!" -ForegroundColor Green
+    Write-Host "[Engine] Phat hien Rust engine dang chay san tren Named Pipe!" -ForegroundColor Green
 } else {
-    Write-Host "[Engine] Dang khoi dong $Engine Engine..." -ForegroundColor Cyan
-    if ($Engine -eq "cs") {
-        $engineExe = "$PSScriptRoot\engine-cs\bin\Debug\net10.0\adblock-engine-cs.exe"
-        if (-not (Test-Path $engineExe)) {
-            Write-Host "Building engine-cs..." -ForegroundColor Yellow
-            dotnet build "$PSScriptRoot\engine-cs\AdblockEngine.csproj"
-        }
-        Start-Process -FilePath "cmd.exe" -ArgumentList "/k", "title AdblockEngine (C#) && `"$engineExe`" --rules `"$PSScriptRoot\spec\test-data\rules.txt`""
-    } else {
-        $engineExe = "$PSScriptRoot\engine-rs\target\debug\adblock-engine-rs.exe"
-        if (-not (Test-Path $engineExe)) {
-            Write-Host "Building engine-rs..." -ForegroundColor Yellow
-            cargo build --manifest-path "$PSScriptRoot\engine-rs\Cargo.toml"
-        }
-        Start-Process -FilePath "cmd.exe" -ArgumentList "/k", "title AdblockEngine (Rust) && `"$engineExe`" --rules `"$PSScriptRoot\spec\test-data\rules.txt`""
+    Write-Host "[Engine] Dang build Rust Release..." -ForegroundColor Cyan
+    $engineDir = "$PSScriptRoot\engine-rs\target\standalone\release"
+    cargo build --release --manifest-path "$PSScriptRoot\engine-rs\Cargo.toml" --target-dir "$PSScriptRoot\engine-rs\target\standalone"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[Loi] Build engine-rs that bai." -ForegroundColor Red
+        exit $LASTEXITCODE
     }
+    $engineExe = "$engineDir\adblock-engine-rs.exe"
+    Start-Process -FilePath "cmd.exe" -ArgumentList "/k", "title AdblockEngine (Rust) && `"$engineExe`" --rules `"$PSScriptRoot\spec\test-data\rules.txt`""
     Start-Sleep -Milliseconds 1500
 }
 

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
@@ -26,10 +27,12 @@ public class ListManagerService
     private readonly string _dataDir;
     private readonly string _cacheDir;
     private readonly string _configFile;
+    private readonly string _manualBlocklistPath;
     private readonly HttpClient _http;
     private readonly EngineClient _engine;
 
     public List<BlocklistSubscription> Subscriptions { get; } = new();
+    public ObservableCollection<string> ManualBlockRules { get; } = new();
 
     public event Action? SubscriptionsChanged;
 
@@ -42,8 +45,10 @@ public class ListManagerService
         _dataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AdblockMonitor");
         _cacheDir = Path.Combine(_dataDir, "lists");
         _configFile = Path.Combine(_dataDir, "subscriptions.json");
+        _manualBlocklistPath = Path.Combine(_dataDir, "manual-blocklist.txt");
 
         Directory.CreateDirectory(_cacheDir);
+        LoadManualBlockRules();
         LoadSubscriptions();
     }
 
@@ -134,7 +139,113 @@ public class ListManagerService
                 paths.Add(sub.LocalPath);
             }
         }
+        if (File.Exists(_manualBlocklistPath))
+        {
+            paths.Add(_manualBlocklistPath);
+        }
         return paths;
+    }
+
+    public async Task<bool> AddManualBlockRuleAsync(string rawDomain)
+    {
+        string? domain = NormalizeManualDomain(rawDomain);
+        if (domain == null || ManualBlockRules.Any(existing => string.Equals(existing, domain, StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        ManualBlockRules.Add(domain);
+        if (!SaveManualBlockRules())
+        {
+            ManualBlockRules.Remove(domain);
+            return false;
+        }
+
+        if (_engine.IsConnected)
+        {
+            await SyncWithEngineAsync();
+        }
+        return true;
+    }
+
+    public async Task<bool> RemoveManualBlockRuleAsync(string domain)
+    {
+        int index = -1;
+        for (int i = 0; i < ManualBlockRules.Count; i++)
+        {
+            if (string.Equals(ManualBlockRules[i], domain, StringComparison.OrdinalIgnoreCase))
+            {
+                index = i;
+                break;
+            }
+        }
+        if (index < 0)
+        {
+            return false;
+        }
+
+        string removedDomain = ManualBlockRules[index];
+        ManualBlockRules.RemoveAt(index);
+        if (!SaveManualBlockRules())
+        {
+            ManualBlockRules.Insert(index, removedDomain);
+            return false;
+        }
+
+        if (_engine.IsConnected)
+        {
+            await SyncWithEngineAsync();
+        }
+        return true;
+    }
+
+    private void LoadManualBlockRules()
+    {
+        if (!File.Exists(_manualBlocklistPath)) return;
+
+        try
+        {
+            foreach (string line in File.ReadAllLines(_manualBlocklistPath))
+            {
+                string? domain = NormalizeManualDomain(line);
+                if (domain != null && !ManualBlockRules.Contains(domain))
+                {
+                    ManualBlockRules.Add(domain);
+                }
+            }
+        }
+        catch { }
+    }
+
+    private bool SaveManualBlockRules()
+    {
+        string tempPath = _manualBlocklistPath + ".tmp";
+        try
+        {
+            Directory.CreateDirectory(_dataDir);
+            File.WriteAllLines(tempPath, ManualBlockRules);
+            File.Move(tempPath, _manualBlocklistPath, overwrite: true);
+            return true;
+        }
+        catch
+        {
+            try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+            return false;
+        }
+    }
+
+    private static string? NormalizeManualDomain(string raw)
+    {
+        string domain = raw.Trim().Trim('.').ToLowerInvariant();
+        if (string.IsNullOrEmpty(domain)) return null;
+
+        foreach (char c in domain)
+        {
+            if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.'))
+                return null;
+        }
+
+        return domain.Split('.').Any(string.IsNullOrEmpty) ? null : domain;
     }
 
     public async Task<bool> AddListAsync(string name, string url)
@@ -244,11 +355,24 @@ public class ListManagerService
         }
     }
 
-    public async Task SyncWithEngineAsync()
+    public async Task EnsureDownloadedAsync()
+    {
+        var missing = Subscriptions
+            .Where(s => s.IsEnabled && !File.Exists(s.LocalPath))
+            .ToList();
+        if (missing.Count == 0) return;
+
+        await Task.WhenAll(missing.Select(DownloadListContentAsync));
+        SaveSubscriptions();
+    }
+
+    public async Task SyncWithEngineAsync(bool skipIfEmpty = false)
     {
         if (!_engine.IsConnected) return;
 
         var enabledPaths = GetEnabledListPaths();
+        // Keep the engine's own startup rules (--rules) until a real list is available.
+        if (skipIfEmpty && enabledPaths.Count == 0) return;
         try
         {
             await _engine.SetListsAsync(enabledPaths);

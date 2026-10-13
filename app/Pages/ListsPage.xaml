@@ -1,0 +1,146 @@
+<Page
+    x:Class="AdblockApp.Pages.ListsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:AdblockApp"
+    xmlns:svc="using:AdblockApp.Services"
+    NavigationCacheMode="Required">
+
+    <Grid Padding="32,16,32,24" RowSpacing="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Grid>
+            <TextBlock Text="Blocklists" Style="{StaticResource TitleTextBlockStyle}" VerticalAlignment="Center" />
+            <Button HorizontalAlignment="Right" Command="{x:Bind ViewModel.UpdateAllSubscriptionsCommand}">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <FontIcon Glyph="&#xE72C;" FontSize="14" />
+                    <TextBlock Text="Update all" />
+                </StackPanel>
+            </Button>
+        </Grid>
+
+        <Border Grid.Row="1" Style="{StaticResource CardStyle}">
+            <Grid ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="220" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBox PlaceholderText="Name (optional)" Text="{x:Bind ViewModel.NewSubscriptionName, Mode=TwoWay}" />
+                <TextBox
+                    Grid.Column="1"
+                    PlaceholderText="https://example.com/list.txt"
+                    Text="{x:Bind ViewModel.NewSubscriptionUrl, Mode=TwoWay}"
+                    KeyDown="Url_KeyDown" />
+                <Button Grid.Column="2" Content="Add list" Style="{StaticResource AccentButtonStyle}" Click="Add_Click" />
+            </Grid>
+        </Border>
+
+        <Border Grid.Row="2" Style="{StaticResource CardStyle}">
+            <StackPanel Spacing="8">
+                <TextBlock Text="Manually blocked domains" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBox
+                        PlaceholderText="example.com"
+                        Text="{x:Bind ViewModel.NewManualBlockDomain, Mode=TwoWay}"
+                        KeyDown="ManualDomain_KeyDown"
+                        AutomationProperties.Name="Domain to block" />
+                    <Button
+                        Grid.Column="1"
+                        Content="Block domain"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Command="{x:Bind ViewModel.AddManualBlockDomainCommand}" />
+                </Grid>
+                <TextBlock
+                    Text="{x:Bind ViewModel.ManualBlockStatus, Mode=OneWay}"
+                    Style="{StaticResource CaptionTextBlockStyle}"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <Grid>
+                    <ListView ItemsSource="{x:Bind ViewModel.ListManager.ManualBlockRules}" MaxHeight="144" SelectionMode="None">
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="x:String">
+                                <Grid ColumnSpacing="12" Padding="0,2">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="{x:Bind}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                    <Button
+                                        Grid.Column="1"
+                                        Tag="{x:Bind}"
+                                        Click="RemoveManualDomain_Click"
+                                        ToolTipService.ToolTip="Remove domain"
+                                        AutomationProperties.Name="Remove blocked domain">
+                                        <FontIcon Glyph="&#xE74D;" FontSize="14" />
+                                    </Button>
+                                </Grid>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                    <TextBlock
+                        Text="No manually blocked domains."
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Visibility="{x:Bind local:Fmt.VisWhenEmpty(ViewModel.ListManager.ManualBlockRules.Count), Mode=OneWay}" />
+                </Grid>
+            </StackPanel>
+        </Border>
+
+        <Border Grid.Row="3" Style="{StaticResource CardStyle}" Padding="0">
+            <Grid>
+                <ListView ItemsSource="{x:Bind ViewModel.Subscriptions}" SelectionMode="None">
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="svc:BlocklistSubscription">
+                            <Grid ColumnSpacing="12" Padding="0,10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock Text="{x:Bind Name}" Style="{StaticResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Text="{x:Bind Url}" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis">
+                                        <Run Text="{x:Bind Status}" /> · <Run Text="{x:Bind local:Fmt.RuleCount(RuleCount)}" /> · <Run Text="{x:Bind local:Fmt.Updated(LastUpdated)}" />
+                                    </TextBlock>
+                                </StackPanel>
+                                <ToggleSwitch
+                                    Grid.Column="1"
+                                    MinWidth="0"
+                                    OnContent=""
+                                    OffContent=""
+                                    IsOn="{x:Bind IsEnabled}"
+                                    Toggled="Toggle_Toggled"
+                                    VerticalAlignment="Center"
+                                    AutomationProperties.Name="Enabled" />
+                                <Button Grid.Column="2" Click="Update_Click" ToolTipService.ToolTip="Update now" AutomationProperties.Name="Update">
+                                    <FontIcon Glyph="&#xE72C;" FontSize="14" />
+                                </Button>
+                                <Button Grid.Column="3" Click="Delete_Click" ToolTipService.ToolTip="Delete" AutomationProperties.Name="Delete">
+                                    <FontIcon Glyph="&#xE74D;" FontSize="14" />
+                                </Button>
+                            </Grid>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+                <TextBlock
+                    Text="No blocklists configured."
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Visibility="{x:Bind local:Fmt.VisWhenEmpty(ViewModel.Subscriptions.Count), Mode=OneWay}" />
+            </Grid>
+        </Border>
+    </Grid>
+</Page>
