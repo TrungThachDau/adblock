@@ -9,14 +9,17 @@ Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "   KHOI DONG ADBLOCK MONOREPO (WINDIVERT) " -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
 
-# 1. Kiem tra quyen Administrator
+# 1. Kiem tra va yeu cau quyen Administrator (UAC)
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
-    Write-Host "[CHU Y] Ban dang chay KHONG co quyen Administrator." -ForegroundColor Yellow
-    Write-Host "       WinDivert can Administrator de divert/chan packet mang." -ForegroundColor Yellow
-    Write-Host "       Neu khong co Admin, Engine se tu dong chay che do Fail-Open (khong chan packet)." -ForegroundColor Yellow
-    Write-Host "       De bat tinh nang chan that, hay chay chuot phai 'Run as administrator'." -ForegroundColor Yellow
-    Write-Host ""
+    Write-Host "[UAC] Dang yeu cau quyen Administrator..." -ForegroundColor Yellow
+    try {
+        Start-Process -FilePath "powershell.exe" -ArgumentList "-ExecutionPolicy Bypass -NoProfile -File `"$PSCommandPath`" -Engine $Engine" -WorkingDirectory $PSScriptRoot -Verb RunAs
+        exit 0
+    } catch {
+        Write-Host "[Loi] Ban da tu choi cap quyen Administrator. Khong the khoi dong." -ForegroundColor Red
+        exit 1
+    }
 }
 
 # 2. Kiem tra xem Engine da dang chay chua qua Named Pipe

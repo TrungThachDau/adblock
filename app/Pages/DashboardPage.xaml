@@ -26,11 +26,19 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <TextBlock Text="Dashboard" Style="{StaticResource TitleTextBlockStyle}" VerticalAlignment="Center" />
             <ToggleSwitch
-                x:Name="ProtectionToggle"
+                x:Name="StartupToggle"
                 Grid.Column="1"
+                OnContent="Start with Windows"
+                OffContent="Start with Windows"
+                IsOn="{x:Bind ViewModel.RunOnStartup, Mode=OneWay}"
+                Toggled="StartupToggle_Toggled" />
+            <ToggleSwitch
+                x:Name="ProtectionToggle"
+                Grid.Column="2"
                 OnContent="Protection on"
                 OffContent="Protection off"
                 IsOn="{x:Bind ViewModel.IsRunning, Mode=OneWay}"

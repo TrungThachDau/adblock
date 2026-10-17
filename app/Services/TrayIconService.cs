@@ -117,6 +117,7 @@ public class TrayIconService : IDisposable
 
     private const uint MF_STRING = 0x00000000;
     private const uint MF_GRAYED = 0x00000001;
+    private const uint MF_CHECKED = 0x00000008;
     private const uint MF_SEPARATOR = 0x00000800;
 
     private const uint TPM_RETURNCMD = 0x0100;
@@ -137,8 +138,10 @@ public class TrayIconService : IDisposable
     private bool _isCreated;
 
     public Func<bool>? GetIsRunning { get; set; }
+    public Func<bool>? GetRunOnStartup { get; set; }
     public Func<string>? GetEngineName { get; set; }
     public Action? ToggleProtectionAction { get; set; }
+    public Action? ToggleStartupAction { get; set; }
     public Action? OpenDashboardAction { get; set; }
     public Action? ExitAction { get; set; }
 
@@ -239,6 +242,7 @@ public class TrayIconService : IDisposable
     private void ShowContextMenu()
     {
         bool isRunning = GetIsRunning?.Invoke() ?? false;
+        bool isStartup = GetRunOnStartup?.Invoke() ?? false;
         string engineName = GetEngineName?.Invoke() ?? "";
 
         IntPtr menu = CreatePopupMenu();
@@ -250,6 +254,7 @@ public class TrayIconService : IDisposable
         }
         AppendMenuW(menu, MF_SEPARATOR, UIntPtr.Zero, "");
         AppendMenuW(menu, MF_STRING, new UIntPtr(1001), isRunning ? "Pause Protection" : "Resume Protection");
+        AppendMenuW(menu, MF_STRING | (isStartup ? MF_CHECKED : 0), new UIntPtr(1004), "Start with Windows");
         AppendMenuW(menu, MF_STRING, new UIntPtr(1002), "Open Dashboard");
         AppendMenuW(menu, MF_SEPARATOR, UIntPtr.Zero, "");
         AppendMenuW(menu, MF_STRING, new UIntPtr(1003), "Exit");
@@ -262,6 +267,10 @@ public class TrayIconService : IDisposable
         if (cmd == 1001)
         {
             ToggleProtectionAction?.Invoke();
+        }
+        else if (cmd == 1004)
+        {
+            ToggleStartupAction?.Invoke();
         }
         else if (cmd == 1002)
         {

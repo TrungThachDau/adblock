@@ -110,6 +110,9 @@ public partial class MainViewModel : ObservableObject
     private bool _isRunning;
 
     [ObservableProperty]
+    private bool _runOnStartup;
+
+    [ObservableProperty]
     private int _activeRulesCount;
 
     [ObservableProperty]
@@ -195,6 +198,12 @@ public partial class MainViewModel : ObservableObject
 
         RefreshSubscriptionsCollection();
         RefreshAllowlistCollection();
+
+        _ = Task.Run(() =>
+        {
+            bool enabled = StartupService.IsStartupEnabled();
+            _dispatcher.TryEnqueue(() => RunOnStartup = enabled);
+        });
     }
 
     private void RefreshSubscriptionsCollection()
@@ -476,6 +485,22 @@ public partial class MainViewModel : ObservableObject
             StatusText = $"Connected: {EngineName} ({(IsRunning ? "running" : "stopped")})";
         }
         catch { }
+    }
+
+    public async Task SetStartupAsync(bool enable)
+    {
+        bool actual = await Task.Run(() =>
+        {
+            StartupService.SetStartupEnabled(enable);
+            return StartupService.IsStartupEnabled();
+        });
+        RunOnStartup = actual;
+    }
+
+    [RelayCommand]
+    public async Task ToggleStartupAsync()
+    {
+        await SetStartupAsync(!RunOnStartup);
     }
 
     [RelayCommand]

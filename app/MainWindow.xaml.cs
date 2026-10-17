@@ -38,10 +38,15 @@ public sealed partial class MainWindow : Window
     _tray = new TrayIconService(hWnd)
     {
       GetIsRunning = () => ViewModel.IsRunning,
+      GetRunOnStartup = () => ViewModel.RunOnStartup,
       GetEngineName = () => $"{ViewModel.EngineName} {ViewModel.EngineVersion}".Trim(),
       ToggleProtectionAction = () => DispatcherQueue.TryEnqueue(async () =>
       {
         try { await ViewModel.ToggleProtectionAsync(); } catch { }
+      }),
+      ToggleStartupAction = () => DispatcherQueue.TryEnqueue(async () =>
+      {
+        try { await ViewModel.ToggleStartupAsync(); } catch { }
       }),
       OpenDashboardAction = () => DispatcherQueue.TryEnqueue(() => Activate()),
       ExitAction = () => DispatcherQueue.TryEnqueue(() =>

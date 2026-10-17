@@ -1,9 +1,0 @@
-{
-  "profiles": {
-    "AdblockEngine": {
-      "commandName": "Project",
-      "commandLineArgs": "--rules ../spec/test-data/rules.txt"
-    }
-  }
-}
-

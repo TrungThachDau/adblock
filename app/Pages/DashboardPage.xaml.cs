@@ -13,6 +13,14 @@ public sealed partial class DashboardPage : Page
     InitializeComponent();
   }
 
+  private async void StartupToggle_Toggled(object sender, RoutedEventArgs e)
+  {
+    if (StartupToggle.IsOn == ViewModel.RunOnStartup) return;
+    try { await ViewModel.SetStartupAsync(StartupToggle.IsOn); }
+    catch { }
+    StartupToggle.IsOn = ViewModel.RunOnStartup;
+  }
+
   private async void ProtectionToggle_Toggled(object sender, RoutedEventArgs e)
   {
     if (ProtectionToggle.IsOn == ViewModel.IsRunning) return;
