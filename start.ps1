@@ -61,19 +61,23 @@ if ($pipeExists) {
 
 # 3. Tim va khoi dong WinUI 3 App
 Write-Host "[App] Dang khoi dong WinUI 3 UI (AdblockApp)..." -ForegroundColor Cyan
-$appExe = "$PSScriptRoot\app\bin\Debug\net10.0-windows10.0.26100.0\win-x64\AdblockApp.exe"
-if (-not (Test-Path $appExe)) {
-    $appExe = "$PSScriptRoot\app\bin\x64\Debug\net10.0-windows10.0.26100.0\win-x64\AdblockApp.exe"
-}
-if (-not (Test-Path $appExe)) {
+$candidates = @(
+    "$PSScriptRoot\app\bin\x64\Release\net10.0-windows10.0.26100.0\win-x64\AdblockApp.exe",
+    "$PSScriptRoot\app\bin\Release\net10.0-windows10.0.26100.0\win-x64\AdblockApp.exe",
+    "$PSScriptRoot\app\bin\x64\Debug\net10.0-windows10.0.26100.0\win-x64\AdblockApp.exe",
+    "$PSScriptRoot\app\bin\Debug\net10.0-windows10.0.26100.0\win-x64\AdblockApp.exe"
+) | Where-Object { Test-Path $_ } | Sort-Object { (Get-Item $_).LastWriteTimeUtc } -Descending
+
+$appExe = $candidates | Select-Object -First 1
+if (-not $appExe) {
     Write-Host "Building AdblockApp..." -ForegroundColor Yellow
-    dotnet build "$PSScriptRoot\app\AdblockApp.csproj"
-    $appExe = "$PSScriptRoot\app\bin\Debug\net10.0-windows10.0.26100.0\win-x64\AdblockApp.exe"
+    dotnet build "$PSScriptRoot\app\AdblockApp.csproj" -c Release -p:Platform=x64
+    $appExe = "$PSScriptRoot\app\bin\x64\Release\net10.0-windows10.0.26100.0\win-x64\AdblockApp.exe"
 }
 
 if (Test-Path $appExe) {
     Start-Process -FilePath $appExe
-    Write-Host "[OK] Da khoi dong Engine va App thanh cong!" -ForegroundColor Green
+    Write-Host "[OK] Da khoi dong Engine va App thanh cong! ($appExe)" -ForegroundColor Green
 } else {
     Write-Host "[Loi] Khong tim thay file thuc thi AdblockApp.exe tai $appExe" -ForegroundColor Red
 }

@@ -31,8 +31,12 @@
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <TextBox PlaceholderText="Name (optional)" Text="{x:Bind ViewModel.NewSubscriptionName, Mode=TwoWay}" />
                 <TextBox
+                    x:Name="SubNameTextBox"
+                    PlaceholderText="Name (optional)"
+                    Text="{x:Bind ViewModel.NewSubscriptionName, Mode=TwoWay}" />
+                <TextBox
+                    x:Name="SubUrlTextBox"
                     Grid.Column="1"
                     PlaceholderText="https://example.com/list.txt"
                     Text="{x:Bind ViewModel.NewSubscriptionUrl, Mode=TwoWay}"
@@ -50,6 +54,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBox
+                        x:Name="ManualDomainTextBox"
                         PlaceholderText="example.com"
                         Text="{x:Bind ViewModel.NewManualBlockDomain, Mode=TwoWay}"
                         KeyDown="ManualDomain_KeyDown"

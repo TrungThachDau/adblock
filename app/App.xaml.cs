@@ -37,7 +37,8 @@ public partial class App : Application
     Client = new EngineClient();
     var lists = new ListManagerService(Client);
     var allowlist = new AllowlistService(Client);
-    ViewModel = new MainViewModel(Client, lists, allowlist, DispatcherQueue.GetForCurrentThread());
+    var privateDns = new PrivateDnsService(Client);
+    ViewModel = new MainViewModel(Client, lists, allowlist, privateDns, DispatcherQueue.GetForCurrentThread());
 
     _window = new MainWindow();
     _window.Activate();

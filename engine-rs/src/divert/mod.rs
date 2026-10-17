@@ -1,7 +1,7 @@
 pub mod ffi;
 
 use crate::ipc::{EngineState, EventBroadcaster, QueryLogEntry};
-use crate::packet::dns::{build_dns_nxdomain, parse_dns_question};
+use crate::packet::dns::{build_dns_nxdomain, build_dns_response, parse_dns_question};
 use crate::packet::tls::build_tcp_rst;
 use crate::packet::{parse_tcp_details, tls, TcpFlowKey};
 use crate::rules::SharedRuleStore;
@@ -109,7 +109,7 @@ pub fn run_packet_loop(
         return;
     }
 
-    let divert = divert.unwrap();
+    let divert = Arc::new(divert.unwrap());
     let mut packet_buffer = vec![0u8; 65535];
     let mut flow_tracker = FlowTracker::new();
 
@@ -164,7 +164,8 @@ pub fn run_packet_loop(
                         format!("{}.{}.{}.{}", raw[12], raw[13], raw[14], raw[15])
                     };
 
-                    let qname = parse_dns_question(dns_payload).map(|q| q.qname);
+                    let parsed_question = parse_dns_question(dns_payload);
+                    let qname = parsed_question.as_ref().map(|q| q.qname.clone());
                     let mut is_blocked = false;
 
                     if let Some(ref domain) = qname {
@@ -199,7 +200,67 @@ pub fn run_packet_loop(
                     }
 
                     if !is_blocked {
-                        // Forward clean packet
+                        let active_doh = {
+                            let guard = state.private_dns.read();
+                            if guard.0.enabled {
+                                guard.1.clone()
+                            } else {
+                                None
+                            }
+                        };
+
+                        // Forward via Private DNS (DoH) if enabled and not querying the DoH bootstrap host itself
+                        if let (Some(doh_target), Some(q)) = (active_doh, parsed_question) {
+                            if !q.qname.eq_ignore_ascii_case(&doh_target.host) {
+                                let raw_owned = raw.to_vec();
+                                let dns_payload_owned = dns_payload.to_vec();
+                                let addr_owned = packet.address.clone();
+                                let divert_clone = Arc::clone(&divert);
+                                let state_clone = Arc::clone(&state);
+                                let broadcaster_clone = broadcaster.clone();
+
+                                std::thread::spawn(move || {
+                                    match state_clone.doh_resolver.resolve(
+                                        &doh_target,
+                                        &q.qname,
+                                        q.qtype,
+                                        q.qclass,
+                                        &dns_payload_owned,
+                                    ) {
+                                        Ok(doh_wire) => {
+                                            if let Some(resp_bytes) =
+                                                build_dns_response(&raw_owned, &doh_wire, is_ipv6)
+                                            {
+                                                let mut resp_packet = unsafe {
+                                                    WinDivertPacket::<NetworkLayer>::new(resp_bytes)
+                                                };
+                                                resp_packet.address = addr_owned;
+                                                resp_packet.address.set_outbound(false);
+                                                let _ = resp_packet
+                                                    .recalculate_checksums(ChecksumFlags::new());
+                                                let _ = divert_clone.send(&resp_packet);
+                                            }
+                                            let log_id = state_clone.next_log_id().to_string();
+                                            broadcaster_clone.send_log(QueryLogEntry {
+                                                id: log_id,
+                                                timestamp,
+                                                protocol: "DoH".to_string(),
+                                                client_ip,
+                                                domain: q.qname,
+                                                action: "allowed".to_string(),
+                                                reason: format!("Private DNS ({})", doh_target.host),
+                                            });
+                                        }
+                                        Err(err) => {
+                                            warn!("Private DNS resolution failed for {}: {}", q.qname, err);
+                                        }
+                                    }
+                                });
+                                continue;
+                            }
+                        }
+
+                        // Forward clean packet directly (standard DNS or DoH bootstrap host)
                         let _ = divert.send(&packet);
                         if let Some(domain) = qname {
                             let log_id = state.next_log_id().to_string();

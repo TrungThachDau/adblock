@@ -98,6 +98,7 @@ public sealed partial class MainWindow : Window
       "dashboard" => typeof(Pages.DashboardPage),
       "lists" => typeof(Pages.ListsPage),
       "allowlist" => typeof(Pages.AllowlistPage),
+      "dns" => typeof(Pages.PrivateDnsPage),
       _ => null
     };
     if (page != null && ContentFrame.CurrentSourcePageType != page)

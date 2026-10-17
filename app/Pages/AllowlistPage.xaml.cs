@@ -1,3 +1,4 @@
+using AdblockApp.Services;
 using AdblockApp.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -12,6 +13,7 @@ public sealed partial class AllowlistPage : Page
   public AllowlistPage()
   {
     InitializeComponent();
+    ClipboardHelper.AttachToTextBox(AllowRuleTextBox, text => ViewModel.NewAllowlistRule = text);
   }
 
   private async void Add_Click(object sender, RoutedEventArgs e)

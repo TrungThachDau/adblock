@@ -24,6 +24,7 @@
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <TextBox
+                    x:Name="AllowRuleTextBox"
                     PlaceholderText="example.com or @@||example.com^"
                     Text="{x:Bind ViewModel.NewAllowlistRule, Mode=TwoWay}"
                     KeyDown="Rule_KeyDown" />

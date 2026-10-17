@@ -1,0 +1,68 @@
+<Page
+    x:Class="AdblockApp.Pages.PrivateDnsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:AdblockApp"
+    NavigationCacheMode="Required">
+
+    <Grid Padding="32,16,32,24" RowSpacing="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Grid ColumnSpacing="16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="Private DNS" Style="{StaticResource TitleTextBlockStyle}" VerticalAlignment="Center" />
+            <ToggleSwitch
+                x:Name="PrivateDnsToggle"
+                Grid.Column="1"
+                OnContent="Enabled"
+                OffContent="Disabled"
+                IsOn="{x:Bind ViewModel.PrivateDnsEnabled, Mode=OneWay}"
+                Toggled="PrivateDnsToggle_Toggled" />
+        </Grid>
+
+        <Border Grid.Row="1" Style="{StaticResource CardStyle}">
+            <StackPanel Spacing="12">
+                <TextBlock Text="Custom DNS-over-HTTPS (DoH) endpoint" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                <TextBlock
+                    Text="Enter a custom RFC 8484 DNS-over-HTTPS URL. Allowed DNS queries will be encrypted and resolved through this endpoint instead of your ISP."
+                    Style="{StaticResource CaptionTextBlockStyle}"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    TextWrapping="Wrap" />
+                <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBox
+                        x:Name="DnsUrlTextBox"
+                        PlaceholderText="https://cloudflare-dns.com/dns-query"
+                        Text="{x:Bind ViewModel.PrivateDnsUrl, Mode=TwoWay}"
+                        KeyDown="Url_KeyDown"
+                        AutomationProperties.Name="Custom Private DNS URL" />
+                    <Button
+                        Grid.Column="1"
+                        Content="Test connection"
+                        Click="Test_Click" />
+                    <Button
+                        Grid.Column="2"
+                        Content="Save"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Click="Save_Click" />
+                </Grid>
+                <TextBlock
+                    Text="{x:Bind ViewModel.PrivateDnsStatus, Mode=OneWay}"
+                    Style="{StaticResource CaptionTextBlockStyle}"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    TextWrapping="Wrap" />
+            </StackPanel>
+        </Border>
+    </Grid>
+</Page>

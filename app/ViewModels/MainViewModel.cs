@@ -82,6 +82,7 @@ public partial class MainViewModel : ObservableObject
     private readonly EngineClient _client;
     private readonly ListManagerService _listManager;
     private readonly AllowlistService _allowlist;
+    private readonly PrivateDnsService _privateDns;
     private readonly DispatcherQueue _dispatcher;
 
     private readonly ConcurrentQueue<BlockedQueryItemViewModel> _incomingBlocked = new();
@@ -93,6 +94,7 @@ public partial class MainViewModel : ObservableObject
 
     public ListManagerService ListManager => _listManager;
     public AllowlistService Allowlist => _allowlist;
+    public PrivateDnsService PrivateDns => _privateDns;
 
     [ObservableProperty]
     private bool _isConnected;
@@ -171,16 +173,26 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private string _manualBlockStatus = "";
 
+    [ObservableProperty]
+    private bool _privateDnsEnabled;
+
+    [ObservableProperty]
+    private string _privateDnsUrl = "";
+
+    [ObservableProperty]
+    private string _privateDnsStatus = "";
+
     public ObservableCollection<BlocklistSubscription> Subscriptions { get; } = new();
     public ObservableCollection<string> AllowlistRules { get; } = new();
     public ObservableCollection<BlockedQueryItemViewModel> RecentBlocked { get; } = new();
     public BulkObservableCollection<QueryLogItemViewModel> QueryLogs { get; } = new();
 
-    public MainViewModel(EngineClient client, ListManagerService listManager, AllowlistService allowlist, DispatcherQueue dispatcher)
+    public MainViewModel(EngineClient client, ListManagerService listManager, AllowlistService allowlist, PrivateDnsService privateDns, DispatcherQueue dispatcher)
     {
         _client = client;
         _listManager = listManager;
         _allowlist = allowlist;
+        _privateDns = privateDns;
         _dispatcher = dispatcher;
 
         _batchTimer = _dispatcher.CreateTimer();
@@ -195,14 +207,25 @@ public partial class MainViewModel : ObservableObject
 
         _listManager.SubscriptionsChanged += RefreshSubscriptionsCollection;
         _allowlist.RulesChanged += RefreshAllowlistCollection;
+        _privateDns.ConfigChanged += RefreshPrivateDnsState;
 
         RefreshSubscriptionsCollection();
         RefreshAllowlistCollection();
+        RefreshPrivateDnsState();
 
         _ = Task.Run(() =>
         {
             bool enabled = StartupService.IsStartupEnabled();
             _dispatcher.TryEnqueue(() => RunOnStartup = enabled);
+        });
+    }
+
+    private void RefreshPrivateDnsState()
+    {
+        _dispatcher.TryEnqueue(() =>
+        {
+            PrivateDnsEnabled = _privateDns.Enabled;
+            PrivateDnsUrl = _privateDns.Url;
         });
     }
 
@@ -258,6 +281,7 @@ public partial class MainViewModel : ObservableObject
                     await RefreshStatusAsync();
                     await _listManager.SyncWithEngineAsync(skipIfEmpty: true);
                     await _allowlist.SyncWithEngineAsync();
+                    await _privateDns.SyncWithEngineAsync();
                     await FetchRecentBlockedAsync();
                     await RefreshStatusAsync();
 
@@ -630,5 +654,76 @@ public partial class MainViewModel : ObservableObject
     public void ClearLogs()
     {
         QueryLogs.Clear();
+    }
+
+    [RelayCommand]
+    public async Task SavePrivateDnsAsync()
+    {
+        string url = PrivateDnsUrl.Trim();
+        if (PrivateDnsEnabled && string.IsNullOrEmpty(url))
+        {
+            PrivateDnsStatus = "Please enter a custom DoH URL before enabling Private DNS.";
+            PrivateDnsEnabled = false;
+            return;
+        }
+
+        try
+        {
+            var updated = await _privateDns.UpdateConfigAsync(PrivateDnsEnabled, url);
+            PrivateDnsEnabled = updated.Enabled;
+            PrivateDnsUrl = updated.Url;
+            PrivateDnsStatus = updated.Enabled
+                ? $"Private DNS enabled ({updated.Url})."
+                : string.IsNullOrEmpty(updated.Url)
+                    ? "Private DNS disabled."
+                    : $"Private DNS disabled (saved URL: {updated.Url}).";
+        }
+        catch (Exception ex)
+        {
+            PrivateDnsStatus = $"Failed to save Private DNS: {ex.Message}";
+            PrivateDnsEnabled = _privateDns.Enabled;
+        }
+    }
+
+    public async Task SetPrivateDnsEnabledAsync(bool enabled)
+    {
+        string url = PrivateDnsUrl.Trim();
+        if (enabled && string.IsNullOrEmpty(url))
+        {
+            PrivateDnsEnabled = false;
+            PrivateDnsStatus = "Enter a custom DoH URL first (e.g. https://cloudflare-dns.com/dns-query).";
+            return;
+        }
+
+        PrivateDnsEnabled = enabled;
+        await SavePrivateDnsAsync();
+    }
+
+    [RelayCommand]
+    public async Task TestPrivateDnsAsync()
+    {
+        string url = PrivateDnsUrl.Trim();
+        if (string.IsNullOrEmpty(url))
+        {
+            PrivateDnsStatus = "Enter a custom DoH URL to test.";
+            return;
+        }
+
+        if (!_client.IsConnected)
+        {
+            PrivateDnsStatus = "Engine is not connected.";
+            return;
+        }
+
+        PrivateDnsStatus = $"Testing connection to {url}...";
+        try
+        {
+            var res = await _client.TestPrivateDnsAsync(url);
+            PrivateDnsStatus = $"Connection successful ({res.LatencyMs} ms).";
+        }
+        catch (Exception ex)
+        {
+            PrivateDnsStatus = $"Connection test failed: {ex.Message}";
+        }
     }
 }

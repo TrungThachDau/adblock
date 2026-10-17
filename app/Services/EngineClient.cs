@@ -74,6 +74,17 @@ public record RulesListResult(
     List<string> Rules
 );
 
+public record PrivateDnsConfigModel(
+    bool Enabled,
+    string Url
+);
+
+public record TestPrivateDnsResult(
+    string Status,
+    long LatencyMs,
+    string Host
+);
+
 public class EngineClient : IDisposable
 {
     public static readonly string[] CandidatePipes = ["adblock.engine", "adblock-engine"];
@@ -449,6 +460,39 @@ public class EngineClient : IDisposable
     public async Task ResetStatsAsync()
     {
         await SendCommandAsync("stats.reset");
+    }
+
+    public async Task<PrivateDnsConfigModel> SetPrivateDnsAsync(bool enabled, string url)
+    {
+        var res = await SendCommandAsync("set_private_dns", new
+        {
+            enabled,
+            url = url ?? ""
+        });
+        bool isEnabled = res.TryGetProperty("enabled", out var en) && en.GetBoolean();
+        string resolvedUrl = res.TryGetProperty("url", out var u) ? u.GetString() ?? "" : "";
+        return new PrivateDnsConfigModel(isEnabled, resolvedUrl);
+    }
+
+    public async Task<PrivateDnsConfigModel> GetPrivateDnsAsync()
+    {
+        var res = await SendCommandAsync("get_private_dns");
+        bool isEnabled = res.TryGetProperty("enabled", out var en) && en.GetBoolean();
+        string resolvedUrl = res.TryGetProperty("url", out var u) ? u.GetString() ?? "" : "";
+        return new PrivateDnsConfigModel(isEnabled, resolvedUrl);
+    }
+
+    public async Task<TestPrivateDnsResult> TestPrivateDnsAsync(string url)
+    {
+        string targetUrl = url ?? "";
+        var res = await SendCommandAsync("test_private_dns", new
+        {
+            url = targetUrl
+        }, timeoutMs: 10000);
+        string status = res.TryGetProperty("status", out var s) ? s.GetString() ?? "ok" : "ok";
+        long latency = res.TryGetProperty("latency_ms", out var l) ? l.GetInt64() : 0;
+        string host = res.TryGetProperty("host", out var h) ? h.GetString() ?? targetUrl : targetUrl;
+        return new TestPrivateDnsResult(status, latency, host);
     }
 
     private static void RaiseSafe(Action a)

@@ -335,6 +335,82 @@ Retrieves a circular buffer of recently blocked queries for diagnostic and UI ac
 }
 ```
 
+### 3.9 `set_private_dns`
+Configures the custom Private DNS (DNS-over-HTTPS / RFC 8484) endpoint in the engine.
+
+#### Request
+```json
+{
+  "id": 9,
+  "cmd": "set_private_dns",
+  "params": {
+    "enabled": true,
+    "url": "https://cloudflare-dns.com/dns-query"
+  }
+}
+```
+
+#### Response
+```json
+{
+  "id": 9,
+  "result": {
+    "status": "ok",
+    "enabled": true,
+    "url": "https://cloudflare-dns.com/dns-query"
+  }
+}
+```
+
+---
+
+### 3.10 `get_private_dns`
+Retrieves the currently active Private DNS configuration.
+
+#### Request
+```json
+{"id": 10, "cmd": "get_private_dns", "params": {}}
+```
+
+#### Response
+```json
+{
+  "id": 10,
+  "result": {
+    "enabled": true,
+    "url": "https://cloudflare-dns.com/dns-query"
+  }
+}
+```
+
+---
+
+### 3.11 `test_private_dns`
+Tests connectivity and measures RFC 8484 DNS resolution latency against a custom DoH URL.
+
+#### Request
+```json
+{
+  "id": 11,
+  "cmd": "test_private_dns",
+  "params": {
+    "url": "https://cloudflare-dns.com/dns-query"
+  }
+}
+```
+
+#### Response
+```json
+{
+  "id": 11,
+  "result": {
+    "status": "ok",
+    "latency_ms": 24,
+    "host": "https://cloudflare-dns.com/dns-query"
+  }
+}
+```
+
 ---
 
 ## 4. Asynchronous Push Events

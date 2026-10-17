@@ -13,6 +13,9 @@ public sealed partial class ListsPage : Page
   public ListsPage()
   {
     InitializeComponent();
+    ClipboardHelper.AttachToTextBox(SubNameTextBox, text => ViewModel.NewSubscriptionName = text);
+    ClipboardHelper.AttachToTextBox(SubUrlTextBox, text => ViewModel.NewSubscriptionUrl = text);
+    ClipboardHelper.AttachToTextBox(ManualDomainTextBox, text => ViewModel.NewManualBlockDomain = text);
   }
 
   private static BlocklistSubscription? Sub(object sender) => (sender as FrameworkElement)?.DataContext as BlocklistSubscription;

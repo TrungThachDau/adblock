@@ -29,8 +29,10 @@
     <RustEngineReleaseDir>$(RustEngineTargetDir)\release</RustEngineReleaseDir>
   </PropertyGroup>
 
-  <Target Name="BuildRustEngine" BeforeTargets="PrepareForBuild">
-    <Exec Command="cargo build --release --manifest-path &quot;$(RustEngineManifest)&quot; --target-dir &quot;$(RustEngineTargetDir)&quot;" />
+  <Target Name="BuildRustEngine" BeforeTargets="PrepareForBuild" Condition="'$(SkipRustBuild)' != 'true'">
+    <Exec
+      Command="cargo build --release --manifest-path &quot;$(RustEngineManifest)&quot; --target-dir &quot;$(RustEngineTargetDir)&quot;"
+      ContinueOnError="WarnAndContinue" />
   </Target>
 
   <Target Name="CopyRustEngine" AfterTargets="Build">
@@ -38,7 +40,10 @@
     <Copy
       SourceFiles="$(RustEngineReleaseDir)\adblock-engine-rs.exe;$(RustEngineReleaseDir)\WinDivert.dll;$(RustEngineReleaseDir)\WinDivert64.sys"
       DestinationFolder="$(OutDir)"
-      SkipUnchangedFiles="true" />
+      SkipUnchangedFiles="true"
+      Retries="1"
+      RetryDelayMilliseconds="200"
+      ContinueOnError="WarnAndContinue" />
     <Copy
       SourceFiles="$(MSBuildProjectDirectory)\..\spec\test-data\rules.txt"
       DestinationFolder="$(OutDir)spec\test-data"

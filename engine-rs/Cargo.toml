@@ -23,6 +23,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_Networking_WinHttp",
     "Win32_System_Pipes",
     "Win32_Storage_FileSystem",
     "Win32_Security",

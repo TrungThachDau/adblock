@@ -1,3 +1,4 @@
+use crate::doh::{DohResolver, ParsedDohUrl, PrivateDnsConfig};
 use crate::rules::SharedRuleStore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -53,6 +54,8 @@ pub struct EngineState {
     pub recent_blocked: parking_lot::RwLock<VecDeque<QueryLogEntry>>,
     pub configured_lists: parking_lot::RwLock<Vec<String>>,
     pub configured_allowlist: parking_lot::RwLock<Vec<String>>,
+    pub private_dns: parking_lot::RwLock<(PrivateDnsConfig, Option<ParsedDohUrl>)>,
+    pub doh_resolver: Arc<DohResolver>,
 }
 
 impl EngineState {
@@ -66,6 +69,8 @@ impl EngineState {
             recent_blocked: parking_lot::RwLock::new(VecDeque::with_capacity(500)),
             configured_lists: parking_lot::RwLock::new(Vec::new()),
             configured_allowlist: parking_lot::RwLock::new(Vec::new()),
+            private_dns: parking_lot::RwLock::new((PrivateDnsConfig::default(), None)),
+            doh_resolver: Arc::new(DohResolver::new()),
         }
     }
 
@@ -181,7 +186,9 @@ impl RpcRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::RpcRequest;
+    use super::{handle_request_line, EngineState, EventBroadcaster, RpcRequest};
+    use crate::rules::RuleStore;
+    use std::sync::Arc;
 
     #[test]
     fn parses_request_with_both_cmd_and_method() {
@@ -194,6 +201,46 @@ mod tests {
     fn parses_request_with_only_cmd() {
         let req = RpcRequest::parse(r#"{"id":1,"cmd":"engine.ping"}"#).unwrap();
         assert_eq!(req.method, "engine.ping");
+    }
+
+    #[tokio::test]
+    async fn set_and_get_private_dns_rpc() {
+        let state = Arc::new(EngineState::new());
+        let rules = Arc::new(parking_lot::RwLock::new(RuleStore::new()));
+        let broadcaster = EventBroadcaster::new(16);
+
+        let resp = handle_request_line(
+            r#"{"id":1,"cmd":"set_private_dns","params":{"enabled":true,"url":"https://cloudflare-dns.com/dns-query"}}"#,
+            &state,
+            &rules,
+            &broadcaster,
+        )
+        .await;
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(v["result"]["enabled"], true);
+        assert_eq!(v["result"]["url"], "https://cloudflare-dns.com/dns-query");
+
+        let get_resp = handle_request_line(
+            r#"{"id":2,"cmd":"get_private_dns","params":{}}"#,
+            &state,
+            &rules,
+            &broadcaster,
+        )
+        .await;
+        let gv: serde_json::Value = serde_json::from_str(&get_resp).unwrap();
+        assert_eq!(gv["result"]["enabled"], true);
+        assert_eq!(gv["result"]["url"], "https://cloudflare-dns.com/dns-query");
+
+        // Reject invalid URL
+        let bad_resp = handle_request_line(
+            r#"{"id":3,"cmd":"set_private_dns","params":{"enabled":true,"url":"not-a-url"}}"#,
+            &state,
+            &rules,
+            &broadcaster,
+        )
+        .await;
+        let bv: serde_json::Value = serde_json::from_str(&bad_resp).unwrap();
+        assert!(bv.get("error").is_some());
     }
 }
 
@@ -387,6 +434,7 @@ async fn handle_request_line(
             };
             let lists_count = state.configured_lists.read().len();
             let stats = state.stats.snapshot();
+            let dns_cfg = state.private_dns.read().0.clone();
 
             json!({
                 "id": req_id,
@@ -397,6 +445,8 @@ async fn handle_request_line(
                     "active_rules_count": rules_count,
                     "allowlist_count": allow_count,
                     "lists_count": lists_count,
+                    "private_dns_enabled": dns_cfg.enabled,
+                    "private_dns_url": dns_cfg.url,
                     "uptime_seconds": state.uptime_seconds(),
                     "stats": stats
                 }
@@ -675,6 +725,116 @@ async fn handle_request_line(
                 "id": req_id,
                 "result": { "status": "ok", "reset": true }
             }).to_string()
+        }
+        "set_private_dns" | "dns.set_config" => {
+            let enabled = params
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let url = params
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+
+            let parsed_url = if !url.is_empty() {
+                match ParsedDohUrl::parse(&url) {
+                    Ok(p) => Some(p),
+                    Err(err) => {
+                        return json!({
+                            "id": req_id,
+                            "error": { "code": -32602, "message": err }
+                        })
+                        .to_string();
+                    }
+                }
+            } else if enabled {
+                return json!({
+                    "id": req_id,
+                    "error": { "code": -32602, "message": "Private DNS URL cannot be empty when enabled." }
+                })
+                .to_string();
+            } else {
+                None
+            };
+
+            let normalized_url = parsed_url
+                .as_ref()
+                .map(|p| p.raw_url.clone())
+                .unwrap_or(url);
+
+            state.doh_resolver.clear_cache();
+            *state.private_dns.write() = (
+                PrivateDnsConfig {
+                    enabled,
+                    url: normalized_url.clone(),
+                },
+                parsed_url,
+            );
+
+            json!({
+                "id": req_id,
+                "result": {
+                    "status": "ok",
+                    "enabled": enabled,
+                    "url": normalized_url
+                }
+            })
+            .to_string()
+        }
+        "get_private_dns" | "dns.get_config" => {
+            let cfg = state.private_dns.read().0.clone();
+            json!({
+                "id": req_id,
+                "result": {
+                    "enabled": cfg.enabled,
+                    "url": cfg.url
+                }
+            })
+            .to_string()
+        }
+        "test_private_dns" | "dns.test" => {
+            let url = params
+                .get("url")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|| state.private_dns.read().0.url.clone());
+
+            let parsed = match ParsedDohUrl::parse(&url) {
+                Ok(p) => p,
+                Err(err) => {
+                    return json!({
+                        "id": req_id,
+                        "error": { "code": -32602, "message": err }
+                    })
+                    .to_string();
+                }
+            };
+
+            let resolver = Arc::clone(&state.doh_resolver);
+            let test_res = tokio::task::spawn_blocking(move || resolver.test_endpoint(&parsed)).await;
+            match test_res {
+                Ok(Ok(latency_ms)) => json!({
+                    "id": req_id,
+                    "result": {
+                        "status": "ok",
+                        "latency_ms": latency_ms,
+                        "host": url
+                    }
+                })
+                .to_string(),
+                Ok(Err(err)) => json!({
+                    "id": req_id,
+                    "error": { "code": -32000, "message": err }
+                })
+                .to_string(),
+                Err(err) => json!({
+                    "id": req_id,
+                    "error": { "code": -32603, "message": format!("Internal task error: {}", err) }
+                })
+                .to_string(),
+            }
         }
         _ => {
             json!({
