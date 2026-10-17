@@ -1,39 +1,11 @@
 pub mod checksum;
 pub mod dns;
+pub mod models;
 pub mod tls;
 
+pub use models::{InspectedPacketInfo, PacketProtocol, TcpFlowKey, TcpPacketDetails};
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PacketProtocol {
-    Dns,
-    Tls,
-    Quic,
-    Other,
-}
-
-pub struct InspectedPacketInfo {
-    pub protocol: PacketProtocol,
-    pub domain: Option<String>,
-    pub client_ip: String,
-    pub is_ipv6: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TcpFlowKey {
-    pub src_ip: IpAddr,
-    pub src_port: u16,
-    pub dst_ip: IpAddr,
-    pub dst_port: u16,
-}
-
-pub struct TcpPacketDetails {
-    pub flow_key: TcpFlowKey,
-    pub flags: u8,
-    pub payload_offset: usize,
-    pub payload_len: usize,
-    pub is_ipv6: bool,
-}
 
 /// Parse TCP header and extract flow key, flags, and payload bounds
 pub fn parse_tcp_details(packet: &[u8]) -> Option<TcpPacketDetails> {

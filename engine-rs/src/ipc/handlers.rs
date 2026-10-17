@@ -1,248 +1,12 @@
-use crate::doh::{DohResolver, ParsedDohUrl, PrivateDnsConfig};
+use super::models::{EngineState, EventBroadcaster, QueryLogEntry, RpcRequest};
+use crate::doh::{ParsedDohUrl, PrivateDnsConfig};
 use crate::rules::SharedRuleStore;
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::collections::VecDeque;
+use serde_json::json;
 use std::io::BufRead;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
-use tokio::net::windows::named_pipe::ServerOptions;
-use tokio::sync::broadcast;
-use tracing::{error, info, warn};
-
-pub const PIPE_NAME_APP: &str = r"\\.\pipe\adblock.engine";
-pub const PIPE_NAME_LEGACY: &str = r"\\.\pipe\adblock-engine";
-
-#[derive(Debug, Default)]
-pub struct EngineMetrics {
-    pub dns_queries: AtomicU64,
-    pub dns_blocked: AtomicU64,
-    pub tls_queries: AtomicU64,
-    pub tls_blocked: AtomicU64,
-    pub quic_dropped: AtomicU64,
-}
-
-impl EngineMetrics {
-    pub fn snapshot(&self) -> StatsData {
-        StatsData {
-            dns_queries: self.dns_queries.load(Ordering::Relaxed),
-            dns_blocked: self.dns_blocked.load(Ordering::Relaxed),
-            tls_queries: self.tls_queries.load(Ordering::Relaxed),
-            tls_blocked: self.tls_blocked.load(Ordering::Relaxed),
-            quic_dropped: self.quic_dropped.load(Ordering::Relaxed),
-        }
-    }
-
-    pub fn reset(&self) {
-        self.dns_queries.store(0, Ordering::Relaxed);
-        self.dns_blocked.store(0, Ordering::Relaxed);
-        self.tls_queries.store(0, Ordering::Relaxed);
-        self.tls_blocked.store(0, Ordering::Relaxed);
-        self.quic_dropped.store(0, Ordering::Relaxed);
-    }
-}
-
-pub struct EngineState {
-    pub start_time: Instant,
-    pub is_paused: AtomicBool,
-    pub stop_requested: AtomicBool,
-    pub stats: EngineMetrics,
-    pub log_seq: AtomicU64,
-    pub recent_blocked: parking_lot::RwLock<VecDeque<QueryLogEntry>>,
-    pub configured_lists: parking_lot::RwLock<Vec<String>>,
-    pub configured_allowlist: parking_lot::RwLock<Vec<String>>,
-    pub private_dns: parking_lot::RwLock<(PrivateDnsConfig, Option<ParsedDohUrl>)>,
-    pub doh_resolver: Arc<DohResolver>,
-}
-
-impl EngineState {
-    pub fn new() -> Self {
-        Self {
-            start_time: Instant::now(),
-            is_paused: AtomicBool::new(false),
-            stop_requested: AtomicBool::new(false),
-            stats: EngineMetrics::default(),
-            log_seq: AtomicU64::new(1),
-            recent_blocked: parking_lot::RwLock::new(VecDeque::with_capacity(500)),
-            configured_lists: parking_lot::RwLock::new(Vec::new()),
-            configured_allowlist: parking_lot::RwLock::new(Vec::new()),
-            private_dns: parking_lot::RwLock::new((PrivateDnsConfig::default(), None)),
-            doh_resolver: Arc::new(DohResolver::new()),
-        }
-    }
-
-    pub fn uptime_seconds(&self) -> u64 {
-        self.start_time.elapsed().as_secs()
-    }
-
-    pub fn next_log_id(&self) -> u64 {
-        self.log_seq.fetch_add(1, Ordering::Relaxed)
-    }
-
-    pub fn record_blocked(&self, entry: QueryLogEntry) {
-        let mut recent = self.recent_blocked.write();
-        if recent.len() >= 500 {
-            recent.pop_back();
-        }
-        recent.push_front(entry);
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StatsData {
-    pub dns_queries: u64,
-    pub dns_blocked: u64,
-    pub tls_queries: u64,
-    pub tls_blocked: u64,
-    pub quic_dropped: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueryLogEntry {
-    pub id: String,
-    pub timestamp: i64,
-    pub protocol: String,
-    pub client_ip: String,
-    pub domain: String,
-    pub action: String,
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum EngineEvent {
-    QueryLog { event: String, data: QueryLogEntry },
-    StatsUpdate { event: String, data: StatsData },
-}
-
-#[derive(Clone)]
-pub struct EventBroadcaster {
-    sender: broadcast::Sender<String>,
-}
-
-impl EventBroadcaster {
-    pub fn new(capacity: usize) -> Self {
-        let (sender, _) = broadcast::channel(capacity);
-        Self { sender }
-    }
-
-    pub fn subscribe(&self) -> broadcast::Receiver<String> {
-        self.sender.subscribe()
-    }
-
-    pub fn send_log(&self, entry: QueryLogEntry) {
-        let event = EngineEvent::QueryLog {
-            event: "query_log".to_string(),
-            data: entry,
-        };
-        if let Ok(json) = serde_json::to_string(&event) {
-            let _ = self.sender.send(json);
-        }
-    }
-
-    pub fn send_stats(&self, stats: StatsData) {
-        let event = EngineEvent::StatsUpdate {
-            event: "stats_update".to_string(),
-            data: stats,
-        };
-        if let Ok(json) = serde_json::to_string(&event) {
-            let _ = self.sender.send(json);
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct RawRpcRequest {
-    id: Value,
-    #[serde(default)]
-    method: Option<String>,
-    #[serde(default)]
-    cmd: Option<String>,
-    #[serde(default)]
-    params: Value,
-}
-
-#[derive(Debug, Clone)]
-pub struct RpcRequest {
-    pub id: Value,
-    pub method: String,
-    pub params: Value,
-}
-
-impl RpcRequest {
-    // The GUI sends both `cmd` and `method`; a serde alias would reject that as a duplicate field.
-    pub fn parse(line: &str) -> Option<Self> {
-        let raw: RawRpcRequest = serde_json::from_str(line).ok()?;
-        Some(Self {
-            id: raw.id,
-            method: raw.method.or(raw.cmd)?,
-            params: raw.params,
-        })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{handle_request_line, EngineState, EventBroadcaster, RpcRequest};
-    use crate::rules::RuleStore;
-    use std::sync::Arc;
-
-    #[test]
-    fn parses_request_with_both_cmd_and_method() {
-        let req = RpcRequest::parse(r#"{"id":"1","cmd":"get_status","method":"get_status","params":{}}"#)
-            .expect("request with both keys must parse");
-        assert_eq!(req.method, "get_status");
-    }
-
-    #[test]
-    fn parses_request_with_only_cmd() {
-        let req = RpcRequest::parse(r#"{"id":1,"cmd":"engine.ping"}"#).unwrap();
-        assert_eq!(req.method, "engine.ping");
-    }
-
-    #[tokio::test]
-    async fn set_and_get_private_dns_rpc() {
-        let state = Arc::new(EngineState::new());
-        let rules = Arc::new(parking_lot::RwLock::new(RuleStore::new()));
-        let broadcaster = EventBroadcaster::new(16);
-
-        let resp = handle_request_line(
-            r#"{"id":1,"cmd":"set_private_dns","params":{"enabled":true,"url":"https://cloudflare-dns.com/dns-query"}}"#,
-            &state,
-            &rules,
-            &broadcaster,
-        )
-        .await;
-        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
-        assert_eq!(v["result"]["enabled"], true);
-        assert_eq!(v["result"]["url"], "https://cloudflare-dns.com/dns-query");
-
-        let get_resp = handle_request_line(
-            r#"{"id":2,"cmd":"get_private_dns","params":{}}"#,
-            &state,
-            &rules,
-            &broadcaster,
-        )
-        .await;
-        let gv: serde_json::Value = serde_json::from_str(&get_resp).unwrap();
-        assert_eq!(gv["result"]["enabled"], true);
-        assert_eq!(gv["result"]["url"], "https://cloudflare-dns.com/dns-query");
-
-        // Reject invalid URL
-        let bad_resp = handle_request_line(
-            r#"{"id":3,"cmd":"set_private_dns","params":{"enabled":true,"url":"not-a-url"}}"#,
-            &state,
-            &rules,
-            &broadcaster,
-        )
-        .await;
-        let bv: serde_json::Value = serde_json::from_str(&bad_resp).unwrap();
-        assert!(bv.get("error").is_some());
-    }
-}
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn get_process_ram() -> (u64, f64) {
     #[cfg(windows)]
@@ -262,135 +26,7 @@ pub fn get_process_ram() -> (u64, f64) {
     (0, 0.0)
 }
 
-pub async fn run_ipc_server(
-    state: Arc<EngineState>,
-    rules: SharedRuleStore,
-    broadcaster: EventBroadcaster,
-) {
-    info!("Starting IPC server on Named Pipes: {} and {}", PIPE_NAME_APP, PIPE_NAME_LEGACY);
-
-    let state1 = Arc::clone(&state);
-    let rules1 = Arc::clone(&rules);
-    let broadcaster1 = broadcaster.clone();
-    tokio::spawn(async move {
-        listen_pipe(PIPE_NAME_APP, state1, rules1, broadcaster1).await;
-    });
-
-    listen_pipe(PIPE_NAME_LEGACY, state, rules, broadcaster).await;
-}
-
-async fn listen_pipe(
-    pipe_name: &str,
-    state: Arc<EngineState>,
-    rules: SharedRuleStore,
-    broadcaster: EventBroadcaster,
-) {
-    let mut server_options = ServerOptions::new();
-    server_options.first_pipe_instance(false);
-
-    loop {
-        match create_pipe_server(&server_options, pipe_name) {
-            Ok(server) => {
-                let state_clone = Arc::clone(&state);
-                let rules_clone = Arc::clone(&rules);
-                let broadcaster_clone = broadcaster.clone();
-
-                match server.connect().await {
-                    Ok(()) => {
-                        tokio::spawn(async move {
-                            handle_client(server, state_clone, rules_clone, broadcaster_clone).await;
-                        });
-                    }
-                    Err(e) => {
-                        warn!("Pipe client connect error on {}: {}", pipe_name, e);
-                    }
-                }
-            }
-            Err(e) => {
-                error!("Failed to create named pipe {}: {}", pipe_name, e);
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            }
-        }
-    }
-}
-
-fn create_pipe_server(
-    options: &ServerOptions,
-    pipe_name: &str,
-) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
-    use std::ffi::c_void;
-    use std::ptr;
-    use windows_sys::Win32::Security::{
-        Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW,
-        SECURITY_ATTRIBUTES,
-    };
-
-    let sddl: Vec<u16> = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let mut security_descriptor: *mut c_void = ptr::null_mut();
-    let converted = unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
-            1,
-            &mut security_descriptor,
-            ptr::null_mut(),
-        )
-    };
-    if converted == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-
-    let mut attributes = SECURITY_ATTRIBUTES {
-        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: security_descriptor,
-        bInheritHandle: 0,
-    };
-    let attributes_ptr = (&mut attributes as *mut SECURITY_ATTRIBUTES).cast::<c_void>();
-    let result = unsafe { options.create_with_security_attributes_raw(pipe_name, attributes_ptr) };
-    unsafe {
-        windows_sys::Win32::Foundation::LocalFree(security_descriptor);
-    }
-    result
-}
-
-async fn handle_client(
-    stream: tokio::net::windows::named_pipe::NamedPipeServer,
-    state: Arc<EngineState>,
-    rules: SharedRuleStore,
-    broadcaster: EventBroadcaster,
-) {
-    let (reader, mut writer) = tokio::io::split(stream);
-    let mut lines = TokioBufReader::new(reader).lines();
-    let mut rx = broadcaster.subscribe();
-
-    loop {
-        tokio::select! {
-            line_result = lines.next_line() => {
-                match line_result {
-                    Ok(Some(line)) => {
-                        let response_str = handle_request_line(&line, &state, &rules, &broadcaster).await;
-                        if writer.write_all(format!("{}\n", response_str).as_bytes()).await.is_err() {
-                            break;
-                        }
-                    }
-                    _ => break, // Client disconnected or error
-                }
-            }
-            // Push events to connected client
-            event_result = rx.recv() => {
-                if let Ok(event_json) = event_result {
-                    if writer.write_all(format!("{}\n", event_json).as_bytes()).await.is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-}
-
-async fn handle_request_line(
+pub async fn handle_request_line(
     line: &str,
     state: &Arc<EngineState>,
     rules: &SharedRuleStore,
@@ -720,7 +356,7 @@ async fn handle_request_line(
         "stats.reset" => {
             state.stats.reset();
             let stats = state.stats.snapshot();
-            broadcaster.send_stats(stats.clone());
+            broadcaster.send_stats(stats);
             json!({
                 "id": req_id,
                 "result": { "status": "ok", "reset": true }
@@ -845,5 +481,66 @@ async fn handle_request_line(
                 }
             }).to_string()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::handle_request_line;
+    use crate::ipc::models::{EngineState, EventBroadcaster, RpcRequest};
+    use crate::rules::RuleStore;
+    use std::sync::Arc;
+
+    #[test]
+    fn parses_request_with_both_cmd_and_method() {
+        let req = RpcRequest::parse(r#"{"id":"1","cmd":"get_status","method":"get_status","params":{}}"#)
+            .expect("request with both keys must parse");
+        assert_eq!(req.method, "get_status");
+    }
+
+    #[test]
+    fn parses_request_with_only_cmd() {
+        let req = RpcRequest::parse(r#"{"id":1,"cmd":"engine.ping"}"#).unwrap();
+        assert_eq!(req.method, "engine.ping");
+    }
+
+    #[tokio::test]
+    async fn set_and_get_private_dns_rpc() {
+        let state = Arc::new(EngineState::new());
+        let rules = Arc::new(parking_lot::RwLock::new(RuleStore::new()));
+        let broadcaster = EventBroadcaster::new(16);
+
+        let resp = handle_request_line(
+            r#"{"id":1,"cmd":"set_private_dns","params":{"enabled":true,"url":"https://cloudflare-dns.com/dns-query"}}"#,
+            &state,
+            &rules,
+            &broadcaster,
+        )
+        .await;
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(v["result"]["enabled"], true);
+        assert_eq!(v["result"]["url"], "https://cloudflare-dns.com/dns-query");
+
+        let get_resp = handle_request_line(
+            r#"{"id":2,"cmd":"get_private_dns","params":{}}"#,
+            &state,
+            &rules,
+            &broadcaster,
+        )
+        .await;
+        let gv: serde_json::Value = serde_json::from_str(&get_resp).unwrap();
+        assert_eq!(gv["result"]["enabled"], true);
+        assert_eq!(gv["result"]["url"], "https://cloudflare-dns.com/dns-query");
+
+        // Reject invalid URL
+        let bad_resp = handle_request_line(
+            r#"{"id":3,"cmd":"set_private_dns","params":{"enabled":true,"url":"not-a-url"}}"#,
+            &state,
+            &rules,
+            &broadcaster,
+        )
+        .await;
+        let bv: serde_json::Value = serde_json::from_str(&bad_resp).unwrap();
+        assert!(bv.get("error").is_some());
     }
 }
