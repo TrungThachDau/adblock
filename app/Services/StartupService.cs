@@ -146,18 +146,9 @@ public static class StartupService
 
             File.WriteAllText(tempXml, xml, Encoding.Unicode);
 
-            using var proc = Process.Start(new ProcessStartInfo
-            {
-                FileName = "schtasks.exe",
-                Arguments = $"/Create /TN \"{TaskName}\" /XML \"{tempXml}\" /F",
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            });
-            if (proc == null) return false;
-            proc.WaitForExit(5000);
-            return proc.ExitCode == 0;
+            // A RunLevel=HighestAvailable task can only be registered from an elevated process.
+            // When running unelevated (e.g. debugging from a non-admin Visual Studio), prompt via UAC.
+            return RunSchtasks($"/Create /TN \"{TaskName}\" /XML \"{tempXml}\" /F") == 0;
         }
         catch
         {
@@ -173,18 +164,54 @@ public static class StartupService
     {
         try
         {
-            using var proc = Process.Start(new ProcessStartInfo
+            if (IsScheduledTaskInstalled())
             {
-                FileName = "schtasks.exe",
-                Arguments = $"/Delete /TN \"{TaskName}\" /F",
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            });
-            proc?.WaitForExit(3000);
+                RunSchtasks($"/Delete /TN \"{TaskName}\" /F");
+            }
         }
         catch { }
+    }
+
+    private static bool IsElevated()
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+    }
+
+    /// <summary>Runs schtasks.exe, elevating through UAC when the current process is not admin. Returns exit code or -1.</summary>
+    private static int RunSchtasks(string arguments)
+    {
+        try
+        {
+            bool elevated = IsElevated();
+            var psi = new ProcessStartInfo
+            {
+                FileName = "schtasks.exe",
+                Arguments = arguments,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden
+            };
+            if (elevated)
+            {
+                psi.UseShellExecute = false;
+                psi.RedirectStandardOutput = true;
+                psi.RedirectStandardError = true;
+            }
+            else
+            {
+                psi.UseShellExecute = true;
+                psi.Verb = "runas";
+            }
+
+            using var proc = Process.Start(psi);
+            if (proc == null) return -1;
+            if (!proc.WaitForExit(30000)) return -1;
+            return proc.ExitCode;
+        }
+        catch
+        {
+            return -1; // includes UAC cancelled
+        }
     }
 
     private static void RemoveRegistryRunValue()

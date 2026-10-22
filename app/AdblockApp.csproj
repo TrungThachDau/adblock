@@ -49,4 +49,17 @@
       DestinationFolder="$(OutDir)spec\test-data"
       SkipUnchangedFiles="true" />
   </Target>
+
+  <!-- Bundle the Rust engine and rules into the publish output -->
+  <Target Name="CopyRustEngineToPublish" AfterTargets="Publish">
+    <MakeDir Directories="$(PublishDir)spec\test-data" />
+    <Copy
+      SourceFiles="$(RustEngineReleaseDir)\adblock-engine-rs.exe;$(RustEngineReleaseDir)\WinDivert.dll;$(RustEngineReleaseDir)\WinDivert64.sys"
+      DestinationFolder="$(PublishDir)"
+      SkipUnchangedFiles="true" />
+    <Copy
+      SourceFiles="$(MSBuildProjectDirectory)\..\spec\test-data\rules.txt"
+      DestinationFolder="$(PublishDir)spec\test-data"
+      SkipUnchangedFiles="true" />
+  </Target>
 </Project>

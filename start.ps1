@@ -14,7 +14,7 @@ $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIden
 if (-not $isAdmin) {
     Write-Host "[UAC] Dang yeu cau quyen Administrator..." -ForegroundColor Yellow
     try {
-        Start-Process -FilePath "powershell.exe" -ArgumentList "-ExecutionPolicy Bypass -NoProfile -File `"$PSCommandPath`" -Engine $Engine" -WorkingDirectory $PSScriptRoot -Verb RunAs
+        Start-Process -FilePath "pwsh.exe" -ArgumentList "-ExecutionPolicy Bypass -NoProfile -File `"$PSCommandPath`" -Engine $Engine" -WorkingDirectory $PSScriptRoot -Verb RunAs
         exit 0
     } catch {
         Write-Host "[Loi] Ban da tu choi cap quyen Administrator. Khong the khoi dong." -ForegroundColor Red
@@ -81,4 +81,3 @@ if (Test-Path $appExe) {
 } else {
     Write-Host "[Loi] Khong tim thay file thuc thi AdblockApp.exe tai $appExe" -ForegroundColor Red
 }
-
